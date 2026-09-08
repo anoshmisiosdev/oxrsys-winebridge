@@ -6,3 +6,4 @@ test/*.exe
 # OpenComposite: patched clone, not tracked - see docs/opencomposite.md for
 # clone + patch + build instructions
 opencomposite/
+test/smoke.exe
