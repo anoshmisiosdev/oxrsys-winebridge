@@ -125,7 +125,7 @@ int main(void)
     auto wait = fn<PFN_xrWaitSwapchainImage>(inst, "xrWaitSwapchainImage");
     auto release = fn<PFN_xrReleaseSwapchainImage>(inst, "xrReleaseSwapchainImage");
 
-    for (int f = 0; f < 900; f++) {   /* ~10s at 90 Hz */
+    for (int f = 0; f < 27000; f++) {   /* ~5min at 90 Hz */
         XrFrameState fs = { XR_TYPE_FRAME_STATE };
         XrFrameWaitInfo fwi = { XR_TYPE_FRAME_WAIT_INFO };
         if (waitFrame(session, &fwi, &fs) != XR_SUCCESS) break;
