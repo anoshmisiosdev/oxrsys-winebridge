@@ -19,6 +19,8 @@ design, OXRSys wiring, and install tooling.
 - [x] M1 — bridge builds on this machine (`wineopenxr.dll` PE32+ builtin-signed,
       `wineopenxr.so` x86_64 Mach-O)
 - [x] M2 — install scripts (`scripts/install.sh <Bottle>`)
+- [x] M2.5 — headless smoke test PASSES in the VR bottle: PE → unixlib → OXRSys,
+      XR_KHR_D3D11_enable advertised (test/smoke.c)
 - [ ] M3 — hello_xr (D3D11) renders on Quest via OXRSys  ← needs headset test
 - [ ] M4 — OpenComposite PE `openvr_api.dll` in front → first SteamVR title
 - [ ] M5 — upstream: OXRSys Vulkan-path GPU sync, more swapchain formats, QPC time converters

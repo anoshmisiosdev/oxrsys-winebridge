@@ -22,6 +22,10 @@ SO="$BUILD/src/unix/wineopenxr.so"
 [ -f "$OXR_MANIFEST" ]         || { echo "ERROR: OXRSys runtime manifest not found at $OXR_MANIFEST"; exit 1; }
 lipo -archs "$(python3 -c "import json;print(json.load(open('$OXR_MANIFEST'))['runtime']['library_path'])")" | grep -q x86_64 \
   || { echo "ERROR: OXRSys dylib has no x86_64 slice (required under Rosetta)"; exit 1; }
+# macOS library-validation policy blocks the loader's dlopen of a non-adhoc-signed
+# dylib inside the Wine process; ad-hoc re-sign locally (verified fix, 2026-09-07)
+codesign --force --sign - "$(python3 -c "import json;print(json.load(open('$OXR_MANIFEST'))['runtime']['library_path'])")"
+
 # DXMT fork check: the bottle must use a DXMT with IMTLD3D11InteropDevice
 if ! grep -rqs "IMTLD3D11InteropDevice" "$CX_WINE/x86_64-windows/"*.dll 2>/dev/null && \
    ! grep -rqs "IMTLD3D11InteropDevice" "$WINEPREFIX/drive_c/windows/system32/"*.dll 2>/dev/null; then

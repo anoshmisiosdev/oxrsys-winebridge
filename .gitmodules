@@ -1,3 +1,7 @@
 [submodule "bridge"]
 	path = bridge
 	url = https://github.com/monofunc/wineopenxr
+[submodule "dxmt"]
+	path = dxmt
+	url = https://github.com/monofunc/dxmt
+	branch = feature/openxr
