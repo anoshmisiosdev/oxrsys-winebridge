@@ -1,14 +1,25 @@
-From d625a0d2ba6f704694e3fd926977d1ebf8801d29 Mon Sep 17 00:00:00 2001
+From 307782a8175c6331fd628efacef1d1be238ad85b Mon Sep 17 00:00:00 2001
 From: anoshmisiosdev <riyananosh@gmail.com>
 Date: Mon, 7 Sep 2026 22:14:16 -0700
-Subject: [PATCH] ImportMTLTexture2D: accept sRGB-variant formats and don't
- require PixelFormatView for RGBA8/BGRA8 imports
+Subject: [PATCH] d3d11: relax ImportMTLTexture2D validation for sRGB-variant
+ RGBA8/BGRA8 imports
 
-An OpenXR runtime's swapchain textures are created as concrete sRGB formats
-without PixelFormatView; a typeless D3D11 desc resolves to the linear variant
-and demands PixelFormatView. Both differences are view-compatible in Metal
-(sRGB<->linear casts are exempt), so tolerate them when importing textures we
-did not create.
+An OpenXR runtime's swapchain textures are created as concrete sRGB
+formats without MTLTextureUsagePixelFormatView, while a typeless D3D11
+desc resolves to the linear variant and demands PixelFormatView. Both
+mismatches are spurious: sRGB<->linear casts within the same format
+family are exempt from Metal's PixelFormatView requirement, so the
+imported texture supports every view the desc allows.
+
+- Treat sRGB and linear variants of RGBA8/BGRA8 as equal when comparing
+  the expected format against the imported texture's format.
+- Don't require PixelFormatView of imported RGBA8/BGRA8-family
+  textures, since every cast a typeless desc of those families permits
+  is an sRGB<->linear pair.
+
+strip_srgb is deliberately narrower than Forget_sRGB: it only relaxes
+import validation for the format families this path has been exercised
+with.
 ---
  src/d3d11/d3d11_texture_device.cpp | 31 ++++++++++++++++++++++++++++--
  1 file changed, 29 insertions(+), 2 deletions(-)
