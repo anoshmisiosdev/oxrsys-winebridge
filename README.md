@@ -1,25 +1,42 @@
 # oxrsys-winebridge
 
-A `wineopenxr`-style bridge for macOS: lets Windows OpenXR/OpenVR apps running
-under Wine/CrossOver on Apple Silicon use [OXRSys](https://github.com/demonixis/OXRSys)
-(native macOS OpenXR runtime, MoltenVK/Metal, Quest streaming) as their runtime.
+Run Windows OpenXR (and, via OpenComposite, OpenVR/SteamVR) apps on Apple
+Silicon Macs, displayed on a Quest headset — CrossOver + a wineopenxr bridge +
+[OXRSys](https://github.com/demonixis/OXRSys).
 
-## Target chain
+    Windows VR game (x86-64, D3D11)
+      → CrossOver 26 (Rosetta 2) → DXMT fork (D3D11→Metal, zero-copy interop)
+      → wineopenxr.dll (PE builtin) → __wine_unix_call → wineopenxr.so (x86_64 Mach-O)
+      → Khronos openxr_loader → liboxrsys-runtime.dylib (XR_KHR_metal_enable)
+      → VideoToolbox H.265 → Wi-Fi/USB → Quest
 
-    Windows VR game (x86-64 PE, D3D11)
-      -> CrossOver / Wine + Rosetta 2
-      -> OpenComposite / xrizer     (OpenVR -> OpenXR, PE)
-      -> DXVK                       (D3D11 -> Vulkan, PE)
-      -> THIS BRIDGE                (PE proxy runtime + in-process native call)
-      -> MoltenVK                   (Vulkan -> Metal)
-      -> OXRSys                     (XR_KHR_vulkan_enable2, VK_EXT_metal_objects)
-      -> VideoToolbox -> Quest
+The bridge itself is [monofunc/wineopenxr](https://github.com/monofunc/wineopenxr)
+(LGPL-2.1), vendored as the `bridge/` submodule. This repo adds the research,
+design, OXRSys wiring, and install tooling.
 
 ## Status
 
-Design phase. Research reports in docs/.
+- [x] M1 — bridge builds on this machine (`wineopenxr.dll` PE32+ builtin-signed,
+      `wineopenxr.so` x86_64 Mach-O)
+- [x] M2 — install scripts (`scripts/install.sh <Bottle>`)
+- [ ] M3 — hello_xr (D3D11) renders on Quest via OXRSys  ← needs headset test
+- [ ] M4 — OpenComposite PE `openvr_api.dll` in front → first SteamVR title
+- [ ] M5 — upstream: OXRSys Vulkan-path GPU sync, more swapchain formats, QPC time converters
 
-## Milestone 1
+## Prerequisites
 
-hello_xr.exe (Vulkan backend) under CrossOver renders on a Quest via OXRSys.
-No DXVK, no OpenVR shim — proves the unixlib + VkImage handoff.
+- CrossOver 26, macOS 15+, Apple Silicon
+- [monofunc/dxmt](https://github.com/monofunc/dxmt) installed, selected as
+  Graphics in the bottle (stock DXMT lacks `IMTLD3D11InteropDevice`)
+- OXRSys runtime installed (universal dylib) + OXRSys Home configured, Quest
+  client running
+- `brew install cmake ninja mingw-w64`
+
+## Build & install
+
+    git submodule update --init --recursive
+    cmake -B bridge/build bridge -G Ninja && cmake --build bridge/build
+    ./scripts/install.sh <BottleName>     # modifies CrossOver.app payload (re-run after CX updates)
+
+Docs: `docs/DESIGN.md` (architecture + risk register), `docs/research-*.md`
+(OXRSys internals, Valve wineopenxr anatomy, macOS toolchain).
