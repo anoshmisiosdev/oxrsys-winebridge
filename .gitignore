@@ -2,3 +2,7 @@ dxmt/toolchains/
 dxmt/build/
 test/OpenXR-SDK-Source/
 test/*.exe
+
+# OpenComposite: patched clone, not tracked - see docs/opencomposite.md for
+# clone + patch + build instructions
+opencomposite/
