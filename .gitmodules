@@ -5,3 +5,6 @@
 	path = dxmt
 	url = https://github.com/monofunc/dxmt
 	branch = feature/openxr
+[submodule "test/OpenXRSamples"]
+	path = test/OpenXRSamples
+	url = https://github.com/maluoi/OpenXRSamples.git

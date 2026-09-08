@@ -7,3 +7,7 @@ test/*.exe
 # clone + patch + build instructions
 opencomposite/
 test/smoke.exe
+bridge/extern/OpenXR-SDK/build/
+bridge/extern/DirectXMath/
+test/OpenXRSamples/SingleFileExample/*.exe
+test/OpenXRSamples/SingleFileExample/*.o
