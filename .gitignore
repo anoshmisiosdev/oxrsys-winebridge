@@ -1,0 +1,4 @@
+dxmt/toolchains/
+dxmt/build/
+test/OpenXR-SDK-Source/
+test/*.exe
