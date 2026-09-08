@@ -24,7 +24,9 @@ design, OXRSys wiring, and install tooling.
 - [x] M3a — d3d11test.exe renders 900 frames through the full chain (headless)
 - [x] M3b — visual confirmation: render observed in OXRSys Simulator (user-verified)
 - [x] M4a — OpenComposite PE openvr_api.dll built (mingw, 4 upstreamable patches) + installer script
-- [ ] M4b — first SteamVR title running end-to-end
+- [~] M4b — BasaultVR (UE4): real fix applied (hidden-area-mesh null crash),
+      now runs 90s+ rendering before a later null-deref crash (client not
+      connected during test - untried variable)
 - [x] M5a — DXMT interop fixes upstreamed: monofunc/dxmt PR #1
 - [ ] M5b — OXRSys upstream: Vulkan-path GPU sync, formats, QPC converters (note drafted in patches/)
 
