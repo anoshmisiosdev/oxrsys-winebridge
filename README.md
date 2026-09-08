@@ -23,8 +23,10 @@ design, OXRSys wiring, and install tooling.
       XR_KHR_D3D11_enable advertised (test/smoke.c)
 - [x] M3a — d3d11test.exe renders 900 frames through the full chain (headless)
 - [x] M3b — visual confirmation: render observed in OXRSys Simulator (user-verified)
-- [ ] M4 — OpenComposite PE `openvr_api.dll` in front → first SteamVR title
-- [ ] M5 — upstream: OXRSys Vulkan-path GPU sync, more swapchain formats, QPC time converters
+- [x] M4a — OpenComposite PE openvr_api.dll built (mingw, 4 upstreamable patches) + installer script
+- [ ] M4b — first SteamVR title running end-to-end
+- [x] M5a — DXMT interop fixes upstreamed: monofunc/dxmt PR #1
+- [ ] M5b — OXRSys upstream: Vulkan-path GPU sync, formats, QPC converters (note drafted in patches/)
 
 ## Prerequisites
 
