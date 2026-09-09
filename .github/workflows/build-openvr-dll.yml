@@ -1,0 +1,83 @@
+name: Build openvr_api.dll
+
+# Single-repo build of the drop-in OpenComposite openvr_api.dll used by this
+# bridge. Cross-compiles the opencomposite/ submodule to a Windows x86_64 DLL on
+# an Ubuntu runner with mingw-w64 (the toolchain the project uses locally), then
+# uploads it as a build artifact and attaches it to a Release on version tags.
+#
+# This is the artifact most users want: download it, then drop it into every game
+# with scripts/provision-all-steamvr.sh — no local build required.
+
+on:
+  push:
+    branches: [main]
+    paths: ['opencomposite', '.github/workflows/build-openvr-dll.yml']
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+    paths: ['opencomposite']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive   # opencomposite + its libs/* (openxr-sdk, glm)
+
+      - name: Install mingw-w64 + build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 \
+            cmake ninja-build
+          # C++20 std::thread needs the POSIX-threads mingw variant.
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+
+      - name: Configure (CMake + Ninja, cross to win64)
+        working-directory: opencomposite
+        run: |
+          # -I ci/compat forwards mixed-case Windows headers (Windows.h, PathCch.h)
+          # that only resolve on case-insensitive macOS; the runner is case-sensitive.
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/ci/x86_64-w64-mingw32.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-I$PWD/ci/compat" \
+            -DCMAKE_C_FLAGS="-I$PWD/ci/compat"
+
+      - name: Build
+        working-directory: opencomposite
+        run: cmake --build build --parallel
+
+      - name: Package openvr_api.dll
+        run: |
+          # The drop-in DLL is the OCOVR shared lib (vrclient_x64.dll), stripped
+          # and renamed openvr_api.dll.
+          mkdir -p dist
+          cp opencomposite/build/bin/vrclient_x64.dll dist/openvr_api.dll
+          x86_64-w64-mingw32-strip dist/openvr_api.dll
+          cp opencomposite/build/bin/vrclient_x64.dll dist/
+          ls -la dist/
+          file dist/openvr_api.dll
+          x86_64-w64-mingw32-objdump -p dist/openvr_api.dll | grep -q VR_InitInternal2 \
+            || { echo "::error::openvr_api.dll missing VR_InitInternal2 export"; exit 1; }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openvr_api-dll-win64
+          path: dist/*.dll
+          if-no-files-found: error
+
+      - name: Attach to Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dll
+          generate_release_notes: true

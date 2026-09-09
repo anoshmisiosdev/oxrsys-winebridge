@@ -3,7 +3,7 @@
 	url = https://github.com/anoshmisiosdev/wineopenxr.git
 [submodule "dxmt"]
 	path = dxmt
-	url = https://github.com/anoshmisiosdev/dxmt.git
+	url = https://github.com/monofunc/dxmt.git
 	branch = feature/openxr
 [submodule "test/OpenXRSamples"]
 	path = test/OpenXRSamples
@@ -16,3 +16,7 @@
 	path = oxrsys-src-jitter
 	url = https://github.com/anoshmisiosdev/oxrsys.git
 	branch = fix/ffe-coherent-at-scale
+[submodule "opencomposite"]
+	path = opencomposite
+	url = https://github.com/anoshmisiosdev/OpenComposite.git
+	branch = merged-fixes

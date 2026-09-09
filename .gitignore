@@ -3,9 +3,9 @@ dxmt/build/
 test/OpenXR-SDK-Source/
 test/*.exe
 
-# OpenComposite: patched clone, not tracked - see docs/opencomposite.md for
-# clone + patch + build instructions
-opencomposite/
+# OpenComposite is now tracked as a submodule (anoshmisiosdev/OpenComposite,
+# merged-fixes) — only its build output is ignored.
+opencomposite/build/
 test/smoke.exe
 bridge/extern/OpenXR-SDK/build/
 bridge/extern/DirectXMath/

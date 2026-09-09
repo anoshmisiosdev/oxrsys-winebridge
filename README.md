@@ -1,192 +1,161 @@
 # oxrsys-winebridge
 
-Run Windows OpenXR and SteamVR (OpenVR) apps on Apple Silicon Macs, displayed
-on a Quest headset — CrossOver + a wineopenxr bridge + [OXRSys](https://github.com/demonixis/OXRSys).
+**Run Windows SteamVR / OpenXR games on an Apple Silicon Mac, streamed to a Meta
+Quest — in hardware-encoded stereo.** No Windows PC, and no SteamVR (which has
+had no macOS build since 2020).
 
-    Windows VR game (x86-64, D3D11)
-      → CrossOver 26 (Rosetta 2) → DXMT fork (D3D11→Metal, zero-copy interop)
-      → wineopenxr.dll (PE builtin) → __wine_unix_call → wineopenxr.so (x86_64 Mach-O)
-      → Khronos openxr_loader → liboxrsys-runtime.dylib (XR_KHR_metal_enable)
-      → VideoToolbox H.265 → Wi-Fi/USB → Quest
+```
+Windows VR game (x86-64, D3D11, OpenVR or native OpenXR)
+  → CrossOver (Rosetta 2)  → OpenComposite openvr_api.dll   (OpenVR → OpenXR; SteamVR titles only)
+  → wineopenxr             (PE builtin → __wine_unix_call → native x86_64 .so)
+  → OXRSys runtime         (native macOS OpenXR, XR_KHR_metal_enable)
+  → DXMT                   (D3D11 → Metal, zero-copy IMTLD3D11InteropDevice)
+  → hardware HEVC          (arm64 out-of-process VideoToolbox helper, ~5 ms)
+  → USB (adb tunnel)       → OXRSys client on the Quest → display
+```
 
-    (SteamVR titles add: OpenComposite openvr_api.dll → the same chain)
+**New here?** Start with **[docs/FRESH-INSTALL.md](docs/FRESH-INSTALL.md)** — the
+dependency diagram and the full what-to-install checklist.
 
-No component of this existed as a working end-to-end path before this
-project. SteamVR itself has had no macOS build since 2020; the pieces below
-were each individually promising but unglued and untested together.
+---
 
-## Status at a glance
+## Get the drop-in DLL (no build required)
+
+SteamVR (OpenVR) titles need OpenComposite's `openvr_api.dll` dropped in beside
+the game. You don't have to build it — **GitHub Actions builds it for you**:
+
+1. **Actions tab → "Build openvr_api.dll"** → download the `openvr_api-dll-win64`
+   artifact (or grab it from a tagged **Release**). It's cross-compiled to a
+   Windows x86-64 DLL with mingw-w64.
+2. Drop it into every installed OpenVR game in one shot:
+   ```bash
+   ./scripts/provision-all-steamvr.sh            # provision all games (idempotent)
+   ./scripts/provision-all-steamvr.sh --restore  # put the stock DLLs back
+   ```
+
+> Built with **mingw-w64 (GCC), not MSVC**, on purpose: the MSVC↔GCC x64 ABI
+> trampolines in this fork are GCC-specific and must be built with mingw g++ to be
+> ABI-correct against the MSVC-compiled games the DLL is dropped into.
+
+## Status
 
 | Milestone | Result |
 |---|---|
 | Bridge builds on Apple Silicon | ✅ verified |
 | PE → unixlib → native OpenXR runtime, headless | ✅ verified (`test/smoke.c`) |
 | Full D3D11 render loop through DXMT → OXRSys | ✅ verified — 27,000 frames at 90 Hz |
-| Visual confirmation (frames actually decode and display) | ✅ verified — user-observed in OXRSys Simulator |
-| SteamVR (OpenVR) title support | ✅ built, ⚠️ compatibility varies by title (see below) |
-| Two real games attempted | SUPERHOT VR: blocked (Unity legacy-binding bug, not ours). BasaultVR (UE4): one real bug found *and fixed*, second bug open |
-| Upstream contributions | 1 PR open ([monofunc/dxmt#1](https://github.com/monofunc/dxmt/pull/1)), 1 more fix ready to submit, 1 compat note drafted for the OXRSys author |
-
-## The chain, and why each link exists
-
-**CrossOver 26** runs the Windows binary under Rosetta 2 — there is no other
-way to execute x86-64 Windows code on Apple Silicon. Its **DXMT fork**
-(`monofunc/dxmt`, `feature/openxr` branch) translates D3D11 calls to Metal
-and — critically — exposes `IMTLD3D11InteropDevice`, an interop interface
-absent from stock DXMT, letting native code get at the underlying
-`MTLTexture` behind a D3D11 texture without a GPU copy.
-
-**wineopenxr** (`monofunc/wineopenxr`, vendored as `bridge/`) is the actual
-bridge: a PE DLL registered as the bottle's OpenXR runtime, paired with a
-native `.so` half that talks to a real OpenXR runtime over Wine's
-`__wine_unix_call` mechanism — the same technique Valve's Proton uses on
-Linux, but reimplemented for macOS with a Metal graphics binding instead of
-Vulkan, since it's the only graphics API that lets DXMT's texture handles
-cross the boundary without a copy. Building it required a full toolchain
-substitution: no `winegcc`/`winebuild` exist for macOS, so this uses
-Homebrew mingw-w64 for the PE half, a `dlltool`-generated `ntdll` import
-library, and a script that hand-writes the "Wine builtin DLL" signature into
-the compiled DLL's header.
-
-**OXRSys** is the native macOS OpenXR runtime on the receiving end — it
-creates the session, owns the Vulkan/Metal swapchain, and streams encoded
-frames to a Quest client over Wi-Fi or USB.
-
-**OpenComposite**, cross-compiled here as a Windows PE `openvr_api.dll`, is
-what lets *SteamVR* (OpenVR) titles use this chain at all: it's an
-OpenVR→OpenXR shim, dropped in place of the real `openvr_api.dll` next to a
-game's executable. `xrizer`, the more actively-developed alternative, was
-ruled out early — it only builds as a Linux `.so`, not a Windows PE DLL, so
-it has no path into a Wine bottle.
-
-## What's proven to work
-
-`test/smoke.c` negotiates the OpenXR loader interface, creates an instance,
-and confirms it's talking to `OXRSys Runtime` — purely to prove the PE→unixlib
-→native-runtime plumbing is alive with no graphics involved.
-
-`test/d3d11test.cpp` is the real test: it creates a D3D11 device, a session
-with a Metal graphics binding, two swapchains, and renders 27,000 frames of
-a color-cycling stereo pair through the entire chain — CrossOver → DXMT →
-wineopenxr → OXRSys → VideoToolbox H.265 encode → network. The user
-confirmed watching the color cycle live in the OXRSys Simulator, i.e. frames
-were genuinely encoded, transmitted, decoded, and displayed, not just
-computed.
-
-## Bugs found, and what they taught us
-
-Every bug below was root-caused with disassembly, register traces, and a
-minimal isolated repro before being called a bug — not guessed. That
-discipline caught a false lead as often as a real one (see the second entry).
-
-**1. `oovr_log_raw`'s static-init-order crash (fixed).** OpenComposite's
-logger held a namespace-scope `std::ofstream` that could be reached by other
-globals' constructors before its own constructor ran — invisible under MSVC,
-fatal under GCC/MinGW, where translation-unit init order differs. Every use
-of the library crashed on `LoadLibrary` before this was fixed. Converted to
-construct-on-first-use.
-
-**2. A DXVK/DXMT format-validation mismatch (fixed, PR open).**
-`ImportMTLTexture2D` rejected every texture OXRSys handed it, because (a) it
-compared pixel formats without accounting for Metal's sRGB/linear
-view-compatibility rule, and (b) it required `PixelFormatView` usage on
-textures we didn't create and don't need to reformat. Both are real,
-narrowly-scoped relaxations, submitted upstream as
-[monofunc/dxmt#1](https://github.com/monofunc/dxmt/pull/1) with a note
-flagging that a broader existing helper (`Forget_sRGB`) might be the
-maintainer's preferred fix instead.
-
-**3. The GCC hidden-return-pointer chase — a genuine dead end, kept here
-because the discipline that ruled it out matters more than the answer.**
-SUPERHOT VR crashed identically on every launch, always in `UnityPlayer.dll`,
-always right after OpenComposite's `GetEyeToHeadTransform` was the last
-logged call. The disassembly of the generated forwarding thunk looked
-exactly like a textbook GCC/MSVC ABI bug: the hidden struct-return pointer
-and the `this` pointer for a virtual member function appeared to be getting
-swapped. Two hours were spent building and testing isolated repros of
-increasing fidelity — trivial version (worked), multiple-inheritance version
-matching the real class hierarchy (worked), version split across separate
-translation units to remove any inlining-driven correctness-by-accident
-(*still worked*) — before a direct disassembly of the actual compiled
-function proved the ground truth: this compiler's ms_abi output puts the
-hidden return pointer in **RCX** and `this` in **RDX**, the reverse of the
-assumption that had been driving the whole investigation. Once corrected,
-every "buggy" instruction was legitimate. SUPERHOT's crash is real but lives
-entirely inside Unity's own unsymbolized 2018-era legacy VR binding — not
-reachable without Unity debug symbols that don't exist for a shipped title.
-
-**4. Null hidden-area-mesh pointer crash in a UE4 title (fixed).**
-BasaultVR crashed on every launch reading address `0x108` — `33 × 8`, the
-exact byte offset of `HmdVector2_t[33]` on a null array. OXRSys doesn't
-implement `XR_KHR_visibility_mask` (confirmed absent from its advertised
-extension list), so OpenComposite correctly falls back to the OpenVR-spec
-answer of `{nullptr, 0}` — a path essentially no real headset runtime ever
-exercises, since every one of them supports visibility masks. Unreal
-Engine's SteamVR plugin evidently doesn't null-check this field before
-indexing it. Fixed by returning a valid, merely-empty allocation instead of
-`nullptr` — after the fix, BasaultVR ran **90 seconds at 147% CPU doing real
-rendering work** (versus an instant crash before) until a second, later,
-unrelated null-dereference — encountered with no VR client connected during
-that particular test run, an untried variable for next time.
+| **Hardware HEVC** encode (arm64 out-of-process helper) | ✅ verified live — ~5 ms encode, full 2272×1264 stereo |
+| Streaming to a real Quest 2 over USB | ✅ working |
+| Native-OpenXR titles (e.g. Pac-Man VR) | ✅ run |
+| SteamVR (OpenVR) titles via OpenComposite (SUPERHOT VR, BasaultVR) | ✅ run |
+| Motion-to-photon latency tuning | 🔧 ongoing (prediction horizon / reprojection) |
 
 ## Repo layout
 
+Everything the project needs is wired into this one repo as submodules. Our own
+changes live either on a fork (where they're substantial) or as a vendored patch
+(where they're a one-liner) — see each row.
+
 ```
-bridge/          wineopenxr, vendored as a git submodule (monofunc/wineopenxr)
-dxmt/             DXMT fork, vendored as a git submodule (monofunc/dxmt, feature/openxr)
-opencomposite/    NOT tracked — patched clone; see docs/opencomposite.md for the
-                  exact clone + patch + build recipe (4 portability patches, all
-                  MSVC→GCC/MinGW gap closures, documented and upstreamable)
-docs/             DESIGN.md (architecture + risk register) and three research
-                  reports (OXRSys internals, Valve's wineopenxr anatomy, the
-                  macOS toolchain landscape) that the design was built from
-patches/          Exported patches + PR text, ready to submit or already sent
-scripts/          install.sh / install-dxmt.sh / install-opencomposite.sh and
-                  their restore/uninstall counterparts — all idempotent, all
-                  back up what they overwrite
-test/             smoke.c (headless PE→unixlib proof) and d3d11test.cpp
-                  (full render-loop proof)
+opencomposite/    submodule → anoshmisiosdev/OpenComposite  (merged-fixes)
+                  OpenVR→OpenXR shim, cross-built to openvr_api.dll. Carries the
+                  MSVC↔GCC ABI trampolines, controller registration, stereo fixes.
+bridge/           submodule → anoshmisiosdev/wineopenxr
+                  the PE↔native OpenXR bridge (+ native win32 perf-counter-time ext)
+dxmt/             submodule → monofunc/dxmt  (feature/openxr) — the DEFAULT fork
+                  D3D11→Metal + IMTLD3D11InteropDevice. Our single OpenXR fix is
+                  applied from patches/ at build time (no personal fork to maintain).
+oxrsys-src/       submodule → anoshmisiosdev/oxrsys  (fix/tracking-reconnect-loop)
+                  the native macOS OpenXR runtime + arm64 HEVC encoder helper
+oxrsys-src-jitter/ submodule → anoshmisiosdev/oxrsys (fix/ffe-coherent-at-scale)
+                  foveated-encoding-at-scale work, kept on its own branch
+test/OpenXRSamples/ submodule → anoshmisiosdev/OpenXRSamples  (touch_controller binding fix)
+patches/          0001-...patch  — the one DXMT OpenXR fix, applied by build-dxmt.sh;
+                  NOTE-oxrsys.md — upstream notes for the OXRSys author
+docs/             FRESH-INSTALL.md (install diagram + checklist), DESIGN.md,
+                  research reports, oxrsys-runtime-fixes.md
+scripts/          build-dxmt.sh, install-dxmt.sh, provision-all-steamvr.sh,
+                  install.sh + restore/uninstall counterparts (all idempotent)
+test/             smoke.c (headless PE→unixlib proof), d3d11test.cpp (render loop)
 ```
 
 ## Build & install
 
-Prerequisites: CrossOver 26, macOS 15+, Apple Silicon, Xcode with the Metal
-toolchain, `brew install cmake ninja mingw-w64`, and OXRSys installed as a
-universal (x86_64 + arm64) dylib — the x86_64 slice is what actually runs
-under Rosetta; without it nothing here works.
+**Prerequisites:** CrossOver, macOS 15+, Apple Silicon, Xcode with the Metal
+toolchain, `brew install cmake ninja meson mingw-w64 android-platform-tools`, and
+OXRSys installed as a **universal (x86_64 + arm64)** dylib — the x86_64 slice is
+what runs under Rosetta; without it nothing here works.
 
 ```bash
-git submodule update --init --recursive
+git clone --recursive https://github.com/anoshmisiosdev/oxrsys-winebridge.git
+cd oxrsys-winebridge
+# (or, in an existing clone) git submodule update --init --recursive
+
+# 1. the wineopenxr bridge — registers as the bottle's OpenXR runtime
 cmake -B bridge/build bridge -G Ninja && cmake --build bridge/build
-./scripts/install.sh <BottleName>        # registers the bridge as the bottle's OpenXR runtime
-./scripts/install-dxmt.sh                # overlays the DXMT fork into CrossOver (backs up stock files)
+./scripts/install.sh VR                    # VR = your CrossOver bottle name
+
+# 2. DXMT (D3D11 → Metal). Applies patches/0001 to the default monofunc fork,
+#    then builds; install-dxmt.sh overlays the DLLs into CrossOver.
+./scripts/build-dxmt.sh
+./scripts/install-dxmt.sh
+
+# 3. openvr_api.dll for SteamVR titles — download from CI (see above), then:
+./scripts/provision-all-steamvr.sh         # drop it into every OpenVR game
 ```
 
-For SteamVR titles, see `docs/opencomposite.md` for the OpenComposite build,
-then:
+On the Quest: enable Developer mode + USB debugging (one-time, via the Meta Quest
+phone app), sideload the OXRSys client APK, connect USB. Then launch any
+provisioned game from Steam — the runtime picks it up automatically.
 
-```bash
-./scripts/install-opencomposite.sh 'C:\path\to\Game'
-```
+## Why each link exists
 
-## What's still open
+**CrossOver + Rosetta 2** run the x86-64 Windows binary — the only way to execute
+it on Apple Silicon. This is the load-bearing constraint: the OXRSys runtime dylib
+is loaded *in-process*, so it must also be x86-64. Native arm64 is only possible
+for **out-of-process** helpers — which is exactly why hardware HEVC encode (which
+VideoToolbox refuses to a Rosetta process) runs in a separate **arm64 helper**.
 
-- A second, later null-dereference in BasaultVR, not yet reproduced with a
-  VR client actually connected.
-- SUPERHOT VR's crash is understood but not fixable from this side — it's
-  inside Unity's own closed, unsymbolized legacy VR binding.
-- D3D12 is out of scope for now: no DXMT/D3D12 interop path exists, and
-  vkd3d-proton (the natural alternative) needs Vulkan features MoltenVK
-  doesn't yet expose.
-- The one DXMT fix and the one OpenComposite fix from bug #4 above are ready
-  to submit upstream but haven't been sent yet.
+**OpenComposite** translates a SteamVR game's OpenVR calls into OpenXR, dropped in
+as `openvr_api.dll` next to the game. (Native-OpenXR titles skip this link.)
+
+**wineopenxr** is the bridge: a PE DLL registered as the bottle's OpenXR runtime,
+paired with a native `.so` half that talks to the real runtime over Wine's
+`__wine_unix_call` — Proton's technique, reimplemented for macOS with a Metal
+graphics binding, the only API that lets DXMT's texture handles cross the boundary
+without a GPU copy.
+
+**OXRSys** is the native macOS OpenXR runtime: it owns the session and swapchain,
+renders the game through **DXMT** (D3D11→Metal, via `IMTLD3D11InteropDevice` —
+zero-copy access to the `MTLTexture` behind a D3D11 texture), encodes, and streams
+to the Quest client.
+
+## Engineering notes (bugs found & fixed)
+
+Each of these was root-caused with disassembly and an isolated repro before being
+called a bug. Full write-ups in `docs/`.
+
+- **Static-init-order crash in OpenComposite's logger** — a namespace-scope
+  `std::ofstream` reachable before its constructor ran; invisible under MSVC,
+  fatal under MinGW. Fixed (construct-on-first-use).
+- **DXMT `ImportMTLTexture2D` rejected every OXRSys texture** — it compared pixel
+  formats without Metal's sRGB/linear view-compatibility rule and demanded
+  `PixelFormatView` on textures we don't reformat. Fixed via a narrow relaxation —
+  now `patches/0001`, applied at build time (see `patches/NOTE-oxrsys.md`).
+- **MSVC↔GCC x64 vtable ABI mismatch** — methods returning a struct >8 bytes by
+  value put the hidden return pointer in different registers under MSVC vs GCC
+  (RCX vs RDX). Crashed SteamVR titles until fixed with naked register-swap
+  trampolines in OpenComposite's codegen. **This is what makes SUPERHOT VR and
+  BasaultVR run.**
+- **Null hidden-area-mesh crash in a UE4 title** — OXRSys doesn't implement
+  `XR_KHR_visibility_mask`, so OpenComposite returned `{nullptr, 0}`; UE4's SteamVR
+  plugin indexed it without a null-check. Fixed by returning a valid empty mesh.
 
 ## Credits
 
 Built on [demonixis/OXRSys](https://github.com/demonixis/OXRSys),
 [monofunc/wineopenxr](https://github.com/monofunc/wineopenxr),
 [monofunc/dxmt](https://github.com/monofunc/dxmt), and
-[aashishvasu/OpenComposite](https://github.com/aashishvasu/OpenComposite),
-all of which did the genuinely hard parts. This project's contribution is
-gluing them into a working chain on Apple Silicon, and the bug reports/fixes
-that came from actually trying to run something real through it.
+[aashishvasu/OpenComposite](https://github.com/aashishvasu/OpenComposite) — all of
+which did the genuinely hard parts. This project glues them into a working chain on
+Apple Silicon, plus the fixes that came from running real games through it.
