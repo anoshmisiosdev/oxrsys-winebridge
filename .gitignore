@@ -11,3 +11,10 @@ bridge/extern/OpenXR-SDK/build/
 bridge/extern/DirectXMath/
 test/OpenXRSamples/SingleFileExample/*.exe
 test/OpenXRSamples/SingleFileExample/*.o
+
+# Session scratch / not-for-tracking
+.DS_Store
+opencomposite-input-fix/
+opencomposite-vtable-fix/
+Pacman VR/
+test/*.log
