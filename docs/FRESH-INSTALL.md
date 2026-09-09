@@ -74,6 +74,16 @@ flowchart LR
 | 8 | **OXRSys runtime** | `liboxrsys-runtime.dylib` + `oxrsys-encoder-helper` (arm64) | `oxrsys-src/` submodule |
 | 9 | **OXRSys config** | `~/Library/Application Support/OXRSys/oxrsys-runtime.toml` | `transport = "usb_adb"`, `encoder_helper = true` |
 | 10 | **adb** | USB tunnel to the headset | `brew install android-platform-tools` |
+| 11 | **BlackHole** *(for headset audio)* | loopback device; route the game's output to it | `brew install blackhole-2ch` — see [Headset audio](#headset-audio-optional) |
+
+### Headset audio (optional)
+To hear game sound in the headset: install **BlackHole** (`brew install blackhole-2ch`),
+create a **Multi-Output Device** (BlackHole 2ch + your speakers) in Audio MIDI Setup
+and select it as the system output, set `headset_audio = true` in the OXRSys config,
+and install the audio-enabled Quest client APK. A Core Audio tap does **not** work
+under CrossOver (silence — needs System-Audio-Recording permission it can't request);
+reading a loopback **input** uses CrossOver's Microphone permission instead. USB only.
+Full steps: see the README's *Headset audio* section.
 
 ### On the Quest 2
 | # | Component | How you get it |

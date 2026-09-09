@@ -56,15 +56,45 @@ the game. You don't have to build it — **GitHub Actions builds it for you**:
 Game audio is captured on the Mac and streamed to the headset. Both halves are in
 this project (the OXRSys protocol previously only *reserved* an audio channel):
 
-- **Server:** a Core Audio process tap on the in-process Wine host captures exactly
-  the game's audio (no virtual device, no permission prompt) and streams it as
-  `TcpRecordType::Audio` records over the video TCP socket.
+- **Server:** the runtime captures a **loopback input device** (BlackHole) via an
+  AUHAL input unit and streams the float32 PCM as `TcpRecordType::Audio` records
+  over the video TCP socket.
 - **Client:** the Quest app plays it via low-latency AAudio.
 
-To use it: set `headset_audio = true` in `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`,
-run the audio-enabled runtime, and install the **Quest client APK** — download it
-from `anoshmisiosdev/oxrsys` → Actions *"Build Android client APK"* (or the
-`client-v*` Release), then `adb install -r app-release.apk`. USB transport only for now.
+> **Why a loopback device and not a system audio tap?** Under CrossOver, a Core
+> Audio process/system tap only ever captures **silence**: the game's audio comes
+> out of a different process, and tapping it needs the *System Audio Recording*
+> TCC permission, which CrossOver's Info.plist can't request. Reading a loopback
+> **input** device instead uses CrossOver's *Microphone* permission, which it
+> **does** have. (macOS's own "PICO Virtual Speaker/Microphone" is **not** a
+> loopback pair, so it can't be used for this.)
+
+### Setup
+
+1. **Install a loopback device:**
+   ```bash
+   brew install blackhole-2ch
+   ```
+   (The runtime also auto-detects Loopback, Soundflower, and VB-Cable.)
+2. **Route the game's audio to it.** In **Audio MIDI Setup**, create a
+   **Multi-Output Device** containing **BlackHole 2ch** *and* your normal output
+   (so you hear the game too), and select it as the system Sound output. Set the
+   **primary/clock device to your physical output** and enable **Drift Correction
+   on BlackHole**.
+3. **Enable audio in the runtime config** —
+   `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`:
+   ```toml
+   headset_audio = true
+   ```
+4. **Install the audio-enabled Quest client APK** — download it from
+   `anoshmisiosdev/oxrsys` → Actions *"Build Android client APK"* (or the
+   `client-v*` Release), then `adb install -r app-release.apk`.
+5. **Relaunch the game** (so Wine opens the new output device) and approve the
+   **Microphone** prompt for CrossOver if it appears.
+
+USB transport only for now. To verify, the runtime log shows
+`AudioCapture: capturing game audio from 'BlackHole 2ch'` and a **non-zero**
+`peak amplitude`.
 
 ## Repo layout
 
