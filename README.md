@@ -48,7 +48,23 @@ the game. You don't have to build it — **GitHub Actions builds it for you**:
 | Streaming to a real Quest 2 over USB | ✅ working |
 | Native-OpenXR titles (e.g. Pac-Man VR) | ✅ run |
 | SteamVR (OpenVR) titles via OpenComposite (SUPERHOT VR, BasaultVR) | ✅ run |
+| **Headset audio** (game sound → Quest, USB) | ✅ implemented (server + client) |
 | Motion-to-photon latency tuning | 🔧 ongoing (prediction horizon / reprojection) |
+
+## Headset audio
+
+Game audio is captured on the Mac and streamed to the headset. Both halves are in
+this project (the OXRSys protocol previously only *reserved* an audio channel):
+
+- **Server:** a Core Audio process tap on the in-process Wine host captures exactly
+  the game's audio (no virtual device, no permission prompt) and streams it as
+  `TcpRecordType::Audio` records over the video TCP socket.
+- **Client:** the Quest app plays it via low-latency AAudio.
+
+To use it: set `headset_audio = true` in `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`,
+run the audio-enabled runtime, and install the **Quest client APK** — download it
+from `anoshmisiosdev/oxrsys` → Actions *"Build Android client APK"* (or the
+`client-v*` Release), then `adb install -r app-release.apk`. USB transport only for now.
 
 ## Repo layout
 

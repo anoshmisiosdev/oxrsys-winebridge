@@ -11,7 +11,7 @@
 [submodule "oxrsys-src"]
 	path = oxrsys-src
 	url = https://github.com/anoshmisiosdev/oxrsys.git
-	branch = fix/tracking-reconnect-loop
+	branch = feat/headset-audio
 [submodule "oxrsys-src-jitter"]
 	path = oxrsys-src-jitter
 	url = https://github.com/anoshmisiosdev/oxrsys.git
