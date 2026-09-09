@@ -8,3 +8,11 @@
 [submodule "test/OpenXRSamples"]
 	path = test/OpenXRSamples
 	url = https://github.com/anoshmisiosdev/OpenXRSamples.git
+[submodule "oxrsys-src"]
+	path = oxrsys-src
+	url = https://github.com/anoshmisiosdev/oxrsys.git
+	branch = fix/tracking-reconnect-loop
+[submodule "oxrsys-src-jitter"]
+	path = oxrsys-src-jitter
+	url = https://github.com/anoshmisiosdev/oxrsys.git
+	branch = fix/ffe-coherent-at-scale
