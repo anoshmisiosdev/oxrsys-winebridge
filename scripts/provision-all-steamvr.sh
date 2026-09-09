@@ -61,16 +61,20 @@ provision_game() {  # $1 = game dir
 }
 
 run_once() {
-  local n=0
+  local n=0 seen=":"
   while IFS= read -r libdir; do
     [ -d "$libdir" ] || continue
     for g in "$libdir"/*/; do
       [ -d "$g" ] || continue
+      # dedupe by canonical path (a library may be reached via >1 spelling)
+      local canon; canon="$(cd "$g" 2>/dev/null && pwd -P)" || continue
+      case "$seen" in *":$canon:"*) continue;; esac
+      seen="$seen$canon:"
       # only games that actually have an openvr_api.dll (= OpenVR/SteamVR titles)
       find "$g" -iname "openvr_api.dll" ! -iname "*.stock" -print -quit 2>/dev/null | grep -q . || continue
       provision_game "$g"; n=$((n+1))
     done
-  done < <(find_libraries | sort -u)
+  done < <(find_libraries)
   echo "$([ "$RESTORE" = 1 ] && echo Restored || echo Provisioned) $n OpenVR game(s) in bottle '$BOTTLE'."
 }
 
