@@ -70,7 +70,7 @@ run_once() {
       find "$g" -iname "openvr_api.dll" ! -iname "*.stock" -print -quit 2>/dev/null | grep -q . || continue
       provision_game "$g"; n=$((n+1))
     done
-  done < <(find_libraries)
+  done < <(find_libraries | sort -u)
   echo "$([ "$RESTORE" = 1 ] && echo Restored || echo Provisioned) $n OpenVR game(s) in bottle '$BOTTLE'."
 }
 
