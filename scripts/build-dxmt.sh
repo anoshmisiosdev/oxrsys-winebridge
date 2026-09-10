@@ -34,7 +34,12 @@ fi
 LLVM_PATH="${LLVM15:-toolchains/llvm-darwin}"
 WINE_PATH="${WINE:-toolchains/wine}"
 if [ ! -d build ]; then
+  # --buildtype=release (-O3) is essential: meson defaults to a debug/-O0 build,
+  # and an unoptimized DXMT is ~4-6x slower at D3D11->Metal translation, which
+  # shows up as encode-path latency (~32ms vs ~6ms) and microstutter in the
+  # streamed frames even though the local render looks fine.
   meson setup build --cross-file build-win64.txt \
+    --buildtype=release \
     -Dnative_llvm_path="$LLVM_PATH" \
     -Dwine_install_path="$WINE_PATH"
 fi
