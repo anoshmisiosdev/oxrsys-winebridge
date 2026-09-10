@@ -1,34 +1,23 @@
-From 307782a8175c6331fd628efacef1d1be238ad85b Mon Sep 17 00:00:00 2001
+From acab2f9480bb6cdd309efb4962240926efa32839 Mon Sep 17 00:00:00 2001
 From: anoshmisiosdev <riyananosh@gmail.com>
-Date: Mon, 7 Sep 2026 22:14:16 -0700
+Date: Wed, 9 Sep 2026 17:02:22 -0700
 Subject: [PATCH] d3d11: relax ImportMTLTexture2D validation for sRGB-variant
  RGBA8/BGRA8 imports
 
-An OpenXR runtime's swapchain textures are created as concrete sRGB
-formats without MTLTextureUsagePixelFormatView, while a typeless D3D11
-desc resolves to the linear variant and demands PixelFormatView. Both
-mismatches are spurious: sRGB<->linear casts within the same format
-family are exempt from Metal's PixelFormatView requirement, so the
-imported texture supports every view the desc allows.
+Vendored patches/0001 folded in so this branch is self-contained
+(3Shain/main + Metal interop + OpenXR sRGB import fix).
 
-- Treat sRGB and linear variants of RGBA8/BGRA8 as equal when comparing
-  the expected format against the imported texture's format.
-- Don't require PixelFormatView of imported RGBA8/BGRA8-family
-  textures, since every cast a typeless desc of those families permits
-  is an sRGB<->linear pair.
-
-strip_srgb is deliberately narrower than Forget_sRGB: it only relaxes
-import validation for the format families this path has been exercised
-with.
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018yQ8zUuprBfVcNWabKkVVM
 ---
  src/d3d11/d3d11_texture_device.cpp | 31 ++++++++++++++++++++++++++++--
  1 file changed, 29 insertions(+), 2 deletions(-)
 
 diff --git a/src/d3d11/d3d11_texture_device.cpp b/src/d3d11/d3d11_texture_device.cpp
-index 9e7c01e..52fca04 100644
+index aa0b5b9..4567d99 100644
 --- a/src/d3d11/d3d11_texture_device.cpp
 +++ b/src/d3d11/d3d11_texture_device.cpp
-@@ -510,6 +510,19 @@ ImportSharedTextureInternal(
+@@ -529,6 +529,19 @@ ImportSharedTextureInternal(
    return device_texture->QueryInterface(riid, ppTexture);
  }
  
@@ -48,7 +37,7 @@ index 9e7c01e..52fca04 100644
  HRESULT
  ImportMTLTexture2D(
      MTLD3D11Device *pDevice, const D3D11_TEXTURE2D_DESC1 *pDesc, uint64_t mtlTexture, ID3D11Texture2D **ppTexture2D
-@@ -540,12 +553,26 @@ ImportMTLTexture2D(
+@@ -559,12 +572,26 @@ ImportMTLTexture2D(
        expectedInfo.mipmap_level_count != mtlInfo.mipmap_level_count ||
        expectedInfo.array_length != mtlInfo.array_length || expectedInfo.sample_count != mtlInfo.sample_count ||
        expectedInfo.type != mtlInfo.type ||

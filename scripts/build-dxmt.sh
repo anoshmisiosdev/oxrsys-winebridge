@@ -1,31 +1,48 @@
 #!/bin/bash
 # Build the DXMT D3D11->Metal translation layer for the bridge.
 #
-# We track the *default* upstream fork (monofunc/dxmt, feature/openxr) as the
-# `dxmt/` submodule and carry our single OpenXR fix as patches/0001-*.patch,
-# applied here before building. This keeps us on the default fork with no
-# personal fork to maintain. After building, run scripts/install-dxmt.sh to
+# Model: the `dxmt/` submodule is pinned to a *pristine* upstream commit
+# (3Shain/dxmt) that we've verified works with our patches. Our changes are NOT
+# a fork branch — they live as patch files in patches/ and are applied here, in
+# order, before building. The pin is frozen until a newer upstream commit is
+# verified against these patches. After building, run scripts/install-dxmt.sh to
 # overlay the built DLLs into CrossOver.
+#
+# Patches (applied in sorted order):
+#   patches/0001-metal-interop.patch     IMTLD3D11InteropDevice (external MTLTexture
+#                                        + fence sharing) — originally by @monofunc
+#   patches/0002-relax-srgb-import.patch relax ImportMTLTexture2D sRGB/linear import
 #
 # Requires: meson, ninja, mingw-w64 (x86_64-w64-mingw32-*). On macOS:
 #   brew install meson ninja mingw-w64
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DXMT="$ROOT/dxmt"
-PATCH="$(ls "$ROOT"/patches/0001-*.patch | head -1)"
 
 [ -d "$DXMT/src" ] || { echo "ERROR: dxmt submodule not checked out. Run: git submodule update --init --recursive"; exit 1; }
 
-# Apply our OpenXR interop patch if it isn't already in the working tree.
-# (Relaxes ImportMTLTexture2D validation so the runtime's sRGB swapchain
-# textures import zero-copy; see the patch header and patches/NOTE-oxrsys.md.)
 cd "$DXMT"
-if git apply --reverse --check "$PATCH" >/dev/null 2>&1; then
-  echo "DXMT OpenXR patch: already applied."
-else
-  git apply "$PATCH"
-  echo "DXMT OpenXR patch: applied $(basename "$PATCH")."
-fi
+echo "DXMT base commit: $(git rev-parse --short HEAD) $(git log -1 --format=%s)"
+
+# Apply each patch in patches/, in sorted order, idempotently. `git apply
+# --reverse --check` succeeds when a patch is already present, so re-running the
+# script (or building after `submodule update`) is safe.
+shopt -s nullglob
+for patch in "$ROOT"/patches/*.patch; do
+  name="$(basename "$patch")"
+  if git apply --reverse --check "$patch" >/dev/null 2>&1; then
+    echo "  patch already applied: $name"
+  elif git apply --check "$patch" >/dev/null 2>&1; then
+    git apply "$patch"
+    echo "  applied: $name"
+  else
+    echo "ERROR: $name does not apply cleanly to $(git rev-parse --short HEAD)." >&2
+    echo "       The pinned DXMT commit likely moved. Re-pin to a verified commit" >&2
+    echo "       or refresh the patch. Aborting." >&2
+    exit 1
+  fi
+done
+shopt -u nullglob
 
 # Configure (once) and build the win64 cross target. The airconv shader compiler
 # needs a native LLVM 15, and winemetal needs Wine headers; both are vendored

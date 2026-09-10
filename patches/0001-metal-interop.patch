@@ -1,0 +1,380 @@
+From f2e35344029a9c60e2fe191cea59a0efa621c6df Mon Sep 17 00:00:00 2001
+From: Mono <81423605+monofunc@users.noreply.github.com>
+Date: Fri, 17 Apr 2026 12:39:38 +0400
+Subject: [PATCH] feat(d3d11): add Metal interop interface for external texture
+ and fence sharing
+
+Introduce IMTLD3D11InteropDevice, a COM interface that allows external consumers to share Metal resources with the D3D11 device:
+
+* ImportMTLTexture2D: adopt an existing MTLTexture as a D3D11 Texture2D, with full property and usage validation
+* GetFenceSharedEvent: extract the MTLSharedEvent handle from a fence
+
+Supporting changes:
+
+* dxmt: add Texture::adopt() for wrapping externally owned Metal textures
+* winemetal: add MTLTexture_getInfo thunk to query properties of an externally owned MTLTexture
+---
+ src/d3d11/d3d11_device.cpp          | 11 ++++++-
+ src/d3d11/d3d11_interfaces.hpp      |  9 +++++-
+ src/d3d11/d3d11_metal_interop.cpp   | 23 +++++++++++++
+ src/d3d11/d3d11_metal_interop.hpp   | 36 +++++++++++++++++++++
+ src/d3d11/d3d11_resource.hpp        |  4 +++
+ src/d3d11/d3d11_texture_device.cpp  | 50 +++++++++++++++++++++++++++++
+ src/d3d11/meson.build               |  1 +
+ src/dxmt/dxmt_texture.cpp           | 15 +++++++++
+ src/dxmt/dxmt_texture.hpp           |  1 +
+ src/winemetal/Metal.hpp             |  5 +++
+ src/winemetal/unix/winemetal_unix.c | 13 ++++++++
+ src/winemetal/winemetal.h           |  2 ++
+ src/winemetal/winemetal_thunks.c    |  8 +++++
+ 13 files changed, 176 insertions(+), 2 deletions(-)
+ create mode 100644 src/d3d11/d3d11_metal_interop.cpp
+ create mode 100644 src/d3d11/d3d11_metal_interop.hpp
+
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index a21b3c5..847d162 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -2,6 +2,7 @@
+ #include "d3d11_fence.hpp"
+ #include "d3d11_input_layout.hpp"
+ #include "d3d11_interfaces.hpp"
++#include "d3d11_metal_interop.hpp"
+ #include "d3d11_multithread.hpp"
+ #include "d3d11_pipeline.hpp"
+ #include "d3d11_class_linkage.hpp"
+@@ -1136,7 +1137,9 @@ public:
+       : adapter_(adapter), device(std::move(device)),
+         cmd_queue_(this->device->queue()),
+         d3d11_device_(this, adapter, feature_level, feature_flags,
+-                      *this->device.get()) {
++                      *this->device.get()),
++        d3d11_interop_device_(static_cast<IUnknown *>(static_cast<IMTLDXGIDevice *>(this)),
++                       &d3d11_device_) {
+     if (adapter_->GetLocalD3DKMT()) {
+       D3DKMT_CREATEDEVICE create = {};
+       create.hAdapter = adapter_->GetLocalD3DKMT();
+@@ -1193,6 +1196,11 @@ public:
+       return S_OK;
+     }
+ 
++    if (riid == __uuidof(IMTLD3D11InteropDevice)) {
++      *ppvObject = ref_and_cast<IMTLD3D11InteropDevice>(&d3d11_interop_device_);
++      return S_OK;
++    }
++
+     if (riid == __uuidof(ID3D11Multithread)) {
+       *ppvObject = ref_and_cast<ID3D11Multithread>(&d3d11_device_.d3dmt_);
+       return S_OK;
+@@ -1307,6 +1315,7 @@ private:
+   std::unique_ptr<Device> device;
+   CommandQueue &cmd_queue_;
+   MTLD3D11DeviceImpl d3d11_device_;
++  MTLD3D11InteropDevice d3d11_interop_device_;
+ };
+ 
+ Com<IMTLDXGIDevice> CreateD3D11Device(std::unique_ptr<Device> &&device,
+diff --git a/src/d3d11/d3d11_interfaces.hpp b/src/d3d11/d3d11_interfaces.hpp
+index ff4bb2b..eeef642 100644
+--- a/src/d3d11/d3d11_interfaces.hpp
++++ b/src/d3d11/d3d11_interfaces.hpp
+@@ -1,6 +1,6 @@
+ #pragma once
+ #include "com/com_guid.hpp"
+-#include "d3d11.h"
++#include <d3d11_3.h>
+ 
+ struct MTL_TEMPORAL_UPSCALE_D3D11_DESC {
+   UINT InputContentWidth; // can be 0, which means full width
+@@ -43,3 +43,10 @@ DEFINE_COM_INTERFACE("efc77ae6-2179-4c0a-b844-7661ca0dcde7", IMTLD3D11DeviceExt)
+     : public IUnknown {
+   virtual void STDMETHODCALLTYPE SetShaderExtensionSlot(UINT Slot) = 0;
+ };
++
++DEFINE_COM_INTERFACE("8b6fc874-7429-430d-8253-522e296cd8e2", IMTLD3D11InteropDevice) : public IUnknown {
++  virtual HRESULT STDMETHODCALLTYPE ImportMTLTexture2D(
++      const D3D11_TEXTURE2D_DESC1 *pDesc, uint64_t mtlTexture, ID3D11Texture2D **ppTexture2D
++  ) = 0;
++  virtual HRESULT STDMETHODCALLTYPE GetFenceSharedEvent(ID3D11Fence * pFence, uint64_t *pMtlSharedEvent) = 0;
++};
+diff --git a/src/d3d11/d3d11_metal_interop.cpp b/src/d3d11/d3d11_metal_interop.cpp
+new file mode 100644
+index 0000000..132c92f
+--- /dev/null
++++ b/src/d3d11/d3d11_metal_interop.cpp
+@@ -0,0 +1,23 @@
++#include "d3d11_metal_interop.hpp"
++#include "d3d11_fence.hpp"
++#include "d3d11_resource.hpp"
++
++namespace dxmt {
++
++HRESULT STDMETHODCALLTYPE
++MTLD3D11InteropDevice::ImportMTLTexture2D(
++    const D3D11_TEXTURE2D_DESC1 *pDesc, uint64_t mtlTexture, ID3D11Texture2D **ppTexture2D
++) {
++  return dxmt::ImportMTLTexture2D(device_, pDesc, mtlTexture, ppTexture2D);
++}
++
++HRESULT STDMETHODCALLTYPE
++MTLD3D11InteropDevice::GetFenceSharedEvent(ID3D11Fence *pFence, uint64_t *pMtlSharedEvent) {
++  if (!pFence || !pMtlSharedEvent)
++    return E_POINTER;
++  auto *fence = static_cast<MTLD3D11Fence *>(pFence);
++  *pMtlSharedEvent = fence->event.handle;
++  return S_OK;
++}
++
++} // namespace dxmt
+diff --git a/src/d3d11/d3d11_metal_interop.hpp b/src/d3d11/d3d11_metal_interop.hpp
+new file mode 100644
+index 0000000..a11c4ef
+--- /dev/null
++++ b/src/d3d11/d3d11_metal_interop.hpp
+@@ -0,0 +1,36 @@
++#pragma once
++
++#include "d3d11_interfaces.hpp"
++#include "d3d11_device.hpp"
++
++namespace dxmt {
++
++class MTLD3D11InteropDevice : public IMTLD3D11InteropDevice {
++public:
++  MTLD3D11InteropDevice(IUnknown *container, MTLD3D11Device *device) : container_(container), device_(device) {}
++
++  HRESULT STDMETHODCALLTYPE
++  QueryInterface(REFIID riid, void **ppvObject) final {
++    return container_->QueryInterface(riid, ppvObject);
++  }
++  ULONG STDMETHODCALLTYPE
++  AddRef() final {
++    return container_->AddRef();
++  }
++  ULONG STDMETHODCALLTYPE
++  Release() final {
++    return container_->Release();
++  }
++
++  HRESULT STDMETHODCALLTYPE ImportMTLTexture2D(
++      const D3D11_TEXTURE2D_DESC1 *pDesc, uint64_t mtlTexture, ID3D11Texture2D **ppTexture2D
++  ) final;
++
++  HRESULT STDMETHODCALLTYPE GetFenceSharedEvent(ID3D11Fence *pFence, uint64_t *pMtlSharedEvent) final;
++
++private:
++  IUnknown *container_;
++  MTLD3D11Device *device_;
++};
++
++} // namespace dxmt
+diff --git a/src/d3d11/d3d11_resource.hpp b/src/d3d11/d3d11_resource.hpp
+index f5602e7..df5198c 100644
+--- a/src/d3d11/d3d11_resource.hpp
++++ b/src/d3d11/d3d11_resource.hpp
+@@ -527,6 +527,10 @@ HRESULT ImportSharedTextureByName(
+     MTLD3D11Device *pDevice, LPCWSTR lpName, DWORD dwDesiredAccess, REFIID riid, void **ppTexture
+ );
+ 
++HRESULT ImportMTLTexture2D(
++    MTLD3D11Device *pDevice, const D3D11_TEXTURE2D_DESC1 *pDesc, uint64_t mtlTexture, ID3D11Texture2D **ppTexture2D
++);
++
+ HRESULT
+ CreateBuffer(MTLD3D11Device *pDevice, const D3D11_BUFFER_DESC *pDesc,
+                     const D3D11_SUBRESOURCE_DATA *pInitialData,
+diff --git a/src/d3d11/d3d11_texture_device.cpp b/src/d3d11/d3d11_texture_device.cpp
+index 1faf496..aa0b5b9 100644
+--- a/src/d3d11/d3d11_texture_device.cpp
++++ b/src/d3d11/d3d11_texture_device.cpp
+@@ -529,6 +529,56 @@ ImportSharedTextureInternal(
+   return device_texture->QueryInterface(riid, ppTexture);
+ }
+ 
++HRESULT
++ImportMTLTexture2D(
++    MTLD3D11Device *pDevice, const D3D11_TEXTURE2D_DESC1 *pDesc, uint64_t mtlTexture, ID3D11Texture2D **ppTexture2D
++) {
++  InitReturnPtr(ppTexture2D);
++  if (!pDesc || !ppTexture2D || !mtlTexture)
++    return E_INVALIDARG;
++
++  WMTTextureInfo expectedInfo;
++  D3D11_TEXTURE2D_DESC1 finalDesc;
++  if (FAILED(CreateMTLTextureDescriptor(pDevice, pDesc, &finalDesc, &expectedInfo)))
++    return E_INVALIDARG;
++
++  if (finalDesc.MiscFlags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
++                             D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX | D3D11_RESOURCE_MISC_TILED))
++    return E_INVALIDARG;
++  if (finalDesc.Usage != D3D11_USAGE_DEFAULT)
++    return E_INVALIDARG;
++
++  // WMT::Reference(obj_handle_t) takes ownership without retaining, so bump the refcount first
++  NSObject_retain(mtlTexture);
++  WMT::Reference<WMT::Texture> mtlRef(mtlTexture);
++
++  WMTTextureInfo mtlInfo;
++  mtlRef.getInfo(mtlInfo);
++
++  if (expectedInfo.width != mtlInfo.width || expectedInfo.height != mtlInfo.height ||
++      expectedInfo.mipmap_level_count != mtlInfo.mipmap_level_count ||
++      expectedInfo.array_length != mtlInfo.array_length || expectedInfo.sample_count != mtlInfo.sample_count ||
++      expectedInfo.type != mtlInfo.type ||
++      ORIGINAL_FORMAT(expectedInfo.pixel_format) != ORIGINAL_FORMAT(mtlInfo.pixel_format)) {
++    ERR("ImportMTLTexture2D: texture property mismatch");
++    return E_INVALIDARG;
++  }
++
++  if ((mtlInfo.usage & expectedInfo.usage) != expectedInfo.usage) {
++    ERR("ImportMTLTexture2D: insufficient Metal texture usage");
++    return E_INVALIDARG;
++  }
++
++  auto texture = Rc<Texture>(new Texture(mtlInfo, pDevice->GetMTLDevice()));
++  auto allocation = texture->adopt(std::move(mtlRef), mtlInfo);
++  if (!allocation)
++    return E_FAIL;
++  texture->rename(std::move(allocation));
++  Com<DeviceTexture<tag_texture_2d>> device_texture =
++      ref(new DeviceTexture<tag_texture_2d>(&finalDesc, std::move(texture), pDevice));
++  return device_texture->QueryInterface(__uuidof(ID3D11Texture2D), (void **)ppTexture2D);
++}
++
+ HRESULT
+ ImportSharedTexture(MTLD3D11Device *pDevice, HANDLE hResource, REFIID riid, void **ppTexture) {
+   InitReturnPtr(ppTexture);
+diff --git a/src/d3d11/meson.build b/src/d3d11/meson.build
+index 948db2a..6fe5599 100644
+--- a/src/d3d11/meson.build
++++ b/src/d3d11/meson.build
+@@ -27,6 +27,7 @@ d3d11_src = [
+   'd3d11_context_def.cpp',
+   'd3d11_multithread.cpp',
+   'd3d11_fence.cpp',
++  'd3d11_metal_interop.cpp',
+ ]
+ 
+ d3d10_src = [
+diff --git a/src/dxmt/dxmt_texture.cpp b/src/dxmt/dxmt_texture.cpp
+index 8db2874..8ef6656 100644
+--- a/src/dxmt/dxmt_texture.cpp
++++ b/src/dxmt/dxmt_texture.cpp
+@@ -228,6 +228,21 @@ Texture::import(mach_port_t mach_port) {
+   return nullptr;
+ }
+ 
++Rc<TextureAllocation>
++Texture::adopt(WMT::Reference<WMT::Texture> &&texture, const WMTTextureInfo &info) {
++  Flags<TextureAllocationFlag> flags;
++  if (info.options & WMTResourceStorageModeManaged)
++    flags.set(TextureAllocationFlag::GpuManaged);
++  if (info.options & WMTResourceStorageModePrivate)
++    flags.set(TextureAllocationFlag::GpuPrivate);
++  if (info.options & WMTResourceHazardTrackingModeUntracked)
++    flags.set(TextureAllocationFlag::NoTracking);
++  if ((info.usage & (WMTTextureUsageShaderWrite | WMTTextureUsageRenderTarget)) == 0)
++    flags.set(TextureAllocationFlag::ShaderReadonly);
++  flags.set(TextureAllocationFlag::Shared);
++  return new TextureAllocation(this, std::move(texture), info, flags);
++}
++
+ TextureView &
+ Texture::view(TextureViewKey key) {
+   return view(key, current_.ptr());
+diff --git a/src/dxmt/dxmt_texture.hpp b/src/dxmt/dxmt_texture.hpp
+index 68d43cd..fba6c7f 100644
+--- a/src/dxmt/dxmt_texture.hpp
++++ b/src/dxmt/dxmt_texture.hpp
+@@ -276,6 +276,7 @@ public:
+ 
+   Rc<TextureAllocation> allocate(Flags<TextureAllocationFlag> flags);
+   Rc<TextureAllocation> import(mach_port_t mach_port);
++  Rc<TextureAllocation> adopt(WMT::Reference<WMT::Texture> &&texture, const WMTTextureInfo &info);
+ 
+   TextureView &view(TextureViewKey key);
+   TextureView &view(TextureViewKey key, TextureAllocation *allocation);
+diff --git a/src/winemetal/Metal.hpp b/src/winemetal/Metal.hpp
+index 8224a0c..93d039e 100644
+--- a/src/winemetal/Metal.hpp
++++ b/src/winemetal/Metal.hpp
+@@ -282,6 +282,11 @@ public:
+     data.set((void *)pixelBytes);
+     return MTLTexture_getBytes(handle, origin, size, level, slice, data, bytesPerRow, bytesPerImage);
+   }
++
++  void
++  getInfo(WMTTextureInfo &info) {
++    MTLTexture_getInfo(handle, &info);
++  }
+ };
+ 
+ class Buffer : public Resource {
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index c01c6f1..2e6317a 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -3118,6 +3118,17 @@ _MTLTexture_getBytes(void *obj) {
+   return STATUS_SUCCESS;
+ }
+ 
++static NTSTATUS
++_MTLTexture_getInfo(void *obj) {
++  struct unixcall_generic_obj_ptr_noret *params = obj;
++  struct WMTTextureInfo *info = params->arg.ptr;
++  id<MTLTexture> texture = (id<MTLTexture>)params->handle;
++  extract_texture_descriptor(texture, info);
++  info->gpu_resource_id = [texture gpuResourceID]._impl;
++  info->mach_port = 0;
++  return STATUS_SUCCESS;
++}
++
+ /*
+  * Definition from cache.c
+  */
+@@ -3275,6 +3286,7 @@ const void *__wine_unix_call_funcs[] = {
+     &_MTLDevice_newIndirectCommandBuffer,
+     &_MTLDevice_newLibraryWithSource,
+     &_MTLTexture_getBytes,
++    &_MTLTexture_getInfo,
+ };
+ 
+ #ifndef DXMT_NATIVE
+@@ -3425,5 +3437,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
+     &_MTLDevice_newIndirectCommandBuffer,
+     &_MTLDevice_newLibraryWithSource,
+     &_MTLTexture_getBytes,
++    &_MTLTexture_getInfo,
+ };
+ #endif
+diff --git a/src/winemetal/winemetal.h b/src/winemetal/winemetal.h
+index 97fffc7..1b324ef 100644
+--- a/src/winemetal/winemetal.h
++++ b/src/winemetal/winemetal.h
+@@ -2148,4 +2148,6 @@ WINEMETAL_API void MTLTexture_getBytes(
+     struct WMTMemoryPointer data, uint64_t bytes_per_row, uint64_t bytes_per_image
+ );
+ 
++WINEMETAL_API void MTLTexture_getInfo(obj_handle_t texture, struct WMTTextureInfo *info);
++
+ #endif
+\ No newline at end of file
+diff --git a/src/winemetal/winemetal_thunks.c b/src/winemetal/winemetal_thunks.c
+index 42286c9..f831c6a 100644
+--- a/src/winemetal/winemetal_thunks.c
++++ b/src/winemetal/winemetal_thunks.c
+@@ -1331,3 +1331,11 @@ MTLTexture_getBytes(
+   params.bytes_per_image = bytes_per_image;
+   UNIX_CALL(145, &params);
+ }
++
++WINEMETAL_API void
++MTLTexture_getInfo(obj_handle_t texture, struct WMTTextureInfo *info) {
++  struct unixcall_generic_obj_ptr_noret params;
++  params.handle = texture;
++  WMT_MEMPTR_SET(params.arg, info);
++  UNIX_CALL(146, &params);
++}
+-- 
+2.50.1 (Apple Git-155)
+
