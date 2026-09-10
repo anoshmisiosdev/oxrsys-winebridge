@@ -108,16 +108,18 @@ opencomposite/    submodule → anoshmisiosdev/OpenComposite  (merged-fixes)
                   MSVC↔GCC ABI trampolines, controller registration, stereo fixes.
 bridge/           submodule → anoshmisiosdev/wineopenxr
                   the PE↔native OpenXR bridge (+ native win32 perf-counter-time ext)
-dxmt/             submodule → monofunc/dxmt  (feature/openxr) — the DEFAULT fork
-                  D3D11→Metal + IMTLD3D11InteropDevice. Our single OpenXR fix is
-                  applied from patches/ at build time (no personal fork to maintain).
+dxmt/             submodule → 3Shain/dxmt — PRISTINE upstream, pinned to a
+                  verified commit. D3D11→Metal. Our changes are NOT a fork; they
+                  ride as patches/ applied by build-dxmt.sh at build time. The pin
+                  is frozen until a newer upstream commit is verified vs the patches.
 oxrsys-src/       submodule → anoshmisiosdev/oxrsys  (fix/tracking-reconnect-loop)
                   the native macOS OpenXR runtime + arm64 HEVC encoder helper
 oxrsys-src-jitter/ submodule → anoshmisiosdev/oxrsys (fix/ffe-coherent-at-scale)
                   foveated-encoding-at-scale work, kept on its own branch
 test/OpenXRSamples/ submodule → anoshmisiosdev/OpenXRSamples  (touch_controller binding fix)
-patches/          0001-...patch  — the one DXMT OpenXR fix, applied by build-dxmt.sh;
-                  NOTE-oxrsys.md — upstream notes for the OXRSys author
+patches/          DXMT patch series applied by build-dxmt.sh (in order):
+                  0001-metal-interop.patch (IMTLD3D11InteropDevice, orig. @monofunc),
+                  0002-relax-srgb-import.patch; NOTE-oxrsys.md upstream notes
 docs/             FRESH-INSTALL.md (install diagram + checklist), DESIGN.md,
                   research reports, oxrsys-runtime-fixes.md
 scripts/          build-dxmt.sh, install-dxmt.sh, provision-all-steamvr.sh,
@@ -141,8 +143,8 @@ cd oxrsys-winebridge
 cmake -B bridge/build bridge -G Ninja && cmake --build bridge/build
 ./scripts/install.sh VR                    # VR = your CrossOver bottle name
 
-# 2. DXMT (D3D11 → Metal). Applies patches/0001 to the default monofunc fork,
-#    then builds; install-dxmt.sh overlays the DLLs into CrossOver.
+# 2. DXMT (D3D11 → Metal). Applies the patches/ series to the pinned pristine
+#    upstream dxmt, then builds release; install-dxmt.sh overlays the DLLs.
 ./scripts/build-dxmt.sh
 ./scripts/install-dxmt.sh
 
