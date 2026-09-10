@@ -27,9 +27,16 @@ else
   echo "DXMT OpenXR patch: applied $(basename "$PATCH")."
 fi
 
-# Configure (once) and build the win64 cross target.
+# Configure (once) and build the win64 cross target. The airconv shader compiler
+# needs a native LLVM 15, and winemetal needs Wine headers; both are vendored
+# under dxmt/toolchains/ (built once, gitignored). Override the paths if yours
+# live elsewhere: LLVM15=/path WINE=/path scripts/build-dxmt.sh
+LLVM_PATH="${LLVM15:-toolchains/llvm-darwin}"
+WINE_PATH="${WINE:-toolchains/wine}"
 if [ ! -d build ]; then
-  meson setup build --cross-file build-win64.txt
+  meson setup build --cross-file build-win64.txt \
+    -Dnative_llvm_path="$LLVM_PATH" \
+    -Dwine_install_path="$WINE_PATH"
 fi
 ninja -C build
 
