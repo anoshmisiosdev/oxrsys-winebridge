@@ -3,7 +3,7 @@
 	url = https://github.com/anoshmisiosdev/wineopenxr.git
 [submodule "dxmt"]
 	path = dxmt
-	url = https://github.com/monofunc/dxmt.git
+	url = https://github.com/anoshmisiosdev/dxmt.git
 	branch = feat/openxr-on-3shain-main
 [submodule "test/OpenXRSamples"]
 	path = test/OpenXRSamples
