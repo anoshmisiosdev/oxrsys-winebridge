@@ -41,6 +41,22 @@ cp "$so" "$DXMT_UNIX/winemetal.so"
 codesign --force --sign - "$DXMT_UNIX/winemetal.so"
 echo "  installed winemetal.so (ad-hoc signed)"
 
+# gamesir's D3D12 path uses a separate Metal 4 backend, winemetal4 (PE + unixlib).
+# CrossOver ships no winemetal4, so d3d12.dll can't resolve it and Wine falls back
+# to builtin vkd3d. Install it into the same builtin dxmt dirs as winemetal.
+m4dll=$(find "$BUILD/src" -name "winemetal4.dll" | head -1)
+m4so=$(find "$BUILD/src" -name "winemetal4.so" | head -1)
+if [ -n "$m4dll" ] && [ -n "$m4so" ]; then
+  [ -f "$DXMT_WIN/winemetal4.dll.pre-gamesir" ] || { [ -f "$DXMT_WIN/winemetal4.dll" ] && cp "$DXMT_WIN/winemetal4.dll" "$DXMT_WIN/winemetal4.dll.pre-gamesir"; }
+  cp "$m4dll" "$DXMT_WIN/winemetal4.dll"
+  [ -f "$DXMT_UNIX/winemetal4.so.pre-gamesir" ] || { [ -f "$DXMT_UNIX/winemetal4.so" ] && cp "$DXMT_UNIX/winemetal4.so" "$DXMT_UNIX/winemetal4.so.pre-gamesir"; }
+  cp "$m4so" "$DXMT_UNIX/winemetal4.so"
+  codesign --force --sign - "$DXMT_UNIX/winemetal4.so"
+  echo "  installed winemetal4.dll + winemetal4.so (ad-hoc signed)"
+else
+  echo "WARNING: winemetal4 not found in build - d3d12 will fall back to vkd3d"
+fi
+
 echo "== installing gamesir d3d12 into bottle system32 =="
 for f in d3d12.dll d3d12core.dll; do
   src=$(find "$BUILD/src" -name "$f" | head -1)

@@ -20,6 +20,17 @@ if [ -f "$DXMT_UNIX/winemetal.so.pre-gamesir" ]; then
   codesign --force --sign - "$DXMT_UNIX/winemetal.so"
   echo "  restored winemetal.so"
 fi
+# winemetal4 was added by the installer (CrossOver ships none); restore or remove.
+if [ -f "$DXMT_WIN/winemetal4.dll.pre-gamesir" ]; then
+  cp "$DXMT_WIN/winemetal4.dll.pre-gamesir" "$DXMT_WIN/winemetal4.dll"; echo "  restored winemetal4.dll"
+else
+  rm -f "$DXMT_WIN/winemetal4.dll"; echo "  removed winemetal4.dll"
+fi
+if [ -f "$DXMT_UNIX/winemetal4.so.pre-gamesir" ]; then
+  cp "$DXMT_UNIX/winemetal4.so.pre-gamesir" "$DXMT_UNIX/winemetal4.so"; codesign --force --sign - "$DXMT_UNIX/winemetal4.so"; echo "  restored winemetal4.so"
+else
+  rm -f "$DXMT_UNIX/winemetal4.so"; echo "  removed winemetal4.so"
+fi
 
 echo "== removing gamesir d3d12 from bottle =="
 for f in d3d12.dll d3d12core.dll; do
