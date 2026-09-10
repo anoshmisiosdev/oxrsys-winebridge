@@ -32,12 +32,21 @@ else
   rm -f "$DXMT_UNIX/winemetal4.so"; echo "  removed winemetal4.so"
 fi
 
-echo "== removing gamesir d3d12 from bottle =="
+echo "== removing gamesir d3d12 from bottle system32 =="
 for f in d3d12.dll d3d12core.dll; do
   if [ -f "$SYS32/$f.pre-gamesir" ]; then
     cp "$SYS32/$f.pre-gamesir" "$SYS32/$f"; echo "  restored $f"
   else
     rm -f "$SYS32/$f"; echo "  removed $f (no prior version)"
+  fi
+done
+
+echo "== removing gamesir d3d12 from builtin dxmt dir =="
+for f in d3d12.dll d3d12core.dll; do
+  if [ -f "$DXMT_WIN/$f.pre-gamesir" ]; then
+    cp "$DXMT_WIN/$f.pre-gamesir" "$DXMT_WIN/$f"; echo "  restored lib/dxmt/$f"
+  else
+    rm -f "$DXMT_WIN/$f"; echo "  removed lib/dxmt/$f (CrossOver ships none)"
   fi
 done
 
