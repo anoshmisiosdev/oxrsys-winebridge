@@ -4,7 +4,7 @@
 [submodule "dxmt"]
 	path = dxmt
 	url = https://github.com/monofunc/dxmt.git
-	branch = feature/openxr
+	branch = feat/openxr-on-3shain-main
 [submodule "test/OpenXRSamples"]
 	path = test/OpenXRSamples
 	url = https://github.com/anoshmisiosdev/OpenXRSamples.git
