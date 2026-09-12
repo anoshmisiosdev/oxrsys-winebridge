@@ -49,6 +49,7 @@ the game. You don't have to build it — **GitHub Actions builds it for you**:
 | Native-OpenXR titles (e.g. Pac-Man VR) | ✅ run |
 | SteamVR (OpenVR) titles via OpenComposite (SUPERHOT VR, BasaultVR) | ✅ run |
 | **Headset audio** (game sound → Quest, USB) | ✅ implemented (server + client) |
+| **Wired Windows Mixed Reality headset** (Dell Visor over USB/HDMI, no Quest) | ✅ lobby + frames at 90 Hz verified through the x86_64 runtime; 6DoF head tracking via Basalt; a real game through the bridge still to confirm |
 | Motion-to-photon latency tuning | 🔧 ongoing (prediction horizon / reprojection) |
 
 ## Headset audio
@@ -112,8 +113,12 @@ dxmt/             submodule → 3Shain/dxmt — PRISTINE upstream, pinned to a
                   verified commit. D3D11→Metal. Our changes are NOT a fork; they
                   ride as patches/ applied by build-dxmt.sh at build time. The pin
                   is frozen until a newer upstream commit is verified vs the patches.
-oxrsys-src/       submodule → anoshmisiosdev/oxrsys  (fix/tracking-reconnect-loop)
-                  the native macOS OpenXR runtime + arm64 HEVC encoder helper
+oxrsys-src/       submodule → anoshmisiosdev/oxrsys  (feat/monado-wmr-driver)
+                  the native macOS OpenXR runtime + arm64 HEVC encoder helper,
+                  plus the wired Windows Mixed Reality path: Monado's WMR driver
+                  (drivers/), the arm64 headset helper that owns the panel,
+                  tracking and lobby (runtime/headset_helper/), Basalt 6DoF,
+                  and the Home "Headset" section. See oxrsys-src/docs/platforms/wmr.md
 oxrsys-src-jitter/ submodule → anoshmisiosdev/oxrsys (fix/ffe-coherent-at-scale)
                   foveated-encoding-at-scale work, kept on its own branch
 test/OpenXRSamples/ submodule → anoshmisiosdev/OpenXRSamples  (touch_controller binding fix)
@@ -123,7 +128,8 @@ patches/          DXMT patch series applied by build-dxmt.sh (in order):
 docs/             FRESH-INSTALL.md (install diagram + checklist), DESIGN.md,
                   research reports, oxrsys-runtime-fixes.md
 scripts/          build-dxmt.sh, install-dxmt.sh, provision-all-steamvr.sh,
-                  install.sh + restore/uninstall counterparts (all idempotent)
+                  install.sh + restore/uninstall counterparts, install-wmr.sh
+                  (wired headset: helper, Basalt, x86_64 runtime, config) — all idempotent
 test/             smoke.c (headless PE→unixlib proof), d3d11test.cpp (render loop)
 ```
 
@@ -155,6 +161,32 @@ cmake -B bridge/build bridge -G Ninja && cmake --build bridge/build
 On the Quest: enable Developer mode + USB debugging (one-time, via the Meta Quest
 phone app), sideload the OXRSys client APK, connect USB. Then launch any
 provisioned game from Steam — the runtime picks it up automatically.
+
+### Wired Windows Mixed Reality headset instead of a Quest
+
+A WMR headset (Dell Visor, Odyssey, Reverb, …) plugged into the Mac over USB
+and HDMI/DisplayPort replaces the streaming client: a native arm64 helper
+process owns the headset (Monado's driver, captured panel display, tracking,
+idle lobby) and the x86_64 runtime inside the Wine process hands it frames
+over shared IOSurfaces. One-time: `brew install hidapi libusb opencv eigen tbb fmt`
+and the EDID display override (macOS hides WMR panels otherwise).
+
+```bash
+# 4. wired headset: arm64 helper (+ camera monitor shim), x86_64 runtime, Basalt 6DoF
+cmake -S oxrsys-src -B oxrsys-src/build -G Ninja -DOXRSYS_WMR_OPENCV=ON
+cmake --build oxrsys-src/build --target oxrsys-headset-helper oxrsys_vit_monitor
+cmake -S oxrsys-src -B oxrsys-src/build/x86 -G Ninja -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_BUILD_TYPE=Release
+cmake --build oxrsys-src/build/x86 --target oxrsys_runtime
+oxrsys-src/drivers/tools/build_basalt.sh                     # optional, positional tracking
+sudo python3 oxrsys-src/drivers/tools/wmr_edid_override.py --install   # once; replug the video cable
+./scripts/install-wmr.sh                                     # installs, sets wired_headset = true, starts the helper
+```
+
+The helper shows a head-tracked lobby on the headset until a game submits
+frames. `oxrsys-headset-helper --monitor` opens a window with the tracking
+cameras and Basalt's features. Controllers: WMR motion controllers over
+Bluetooth or PS Move (orientation only so far). Full guide:
+`oxrsys-src/docs/platforms/wmr.md`.
 
 ## Why each link exists
 

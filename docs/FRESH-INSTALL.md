@@ -75,6 +75,7 @@ flowchart LR
 | 9 | **OXRSys config** | `~/Library/Application Support/OXRSys/oxrsys-runtime.toml` | `transport = "usb_adb"`, `encoder_helper = true` |
 | 10 | **adb** | USB tunnel to the headset | `brew install android-platform-tools` |
 | 11 | **BlackHole** *(for headset audio)* | loopback device; route the game's output to it | `brew install blackhole-2ch` — see [Headset audio](#headset-audio-optional) |
+| 12 | **Wired WMR headset** *(instead of a Quest)* | `oxrsys-headset-helper` (arm64) + `libbasalt.dylib` next to the runtime, `wired_headset = true` | `scripts/install-wmr.sh` — see [Wired Windows Mixed Reality headset](#wired-windows-mixed-reality-headset-instead-of-a-quest) |
 
 ### Headset audio (optional)
 To hear game sound in the headset: install **BlackHole** (`brew install blackhole-2ch`),
@@ -143,6 +144,36 @@ cp build/helper/oxrsys-encoder-helper ~/liboxrsys-runtime-1.1.0/oxrsys-encoder-h
 ```
 Enable it in `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`:
 `encoder_helper = true` and `encoder_helper_path = ".../oxrsys-encoder-helper"`.
+
+### Wired Windows Mixed Reality headset (instead of a Quest)
+A WMR headset plugged into the Mac (USB + HDMI/DisplayPort) replaces the
+streaming client. The headset is owned by a **native arm64** helper process
+(Monado's WMR driver, the panel captured as a display, IMU + Basalt tracking,
+an idle lobby); the x86_64 runtime in the Wine process connects to it over a
+Unix socket and hands frames over shared IOSurfaces. Nothing in the Wine
+process touches USB.
+
+```bash
+brew install hidapi libusb opencv eigen tbb fmt
+
+cd oxrsys-src
+cmake -S . -B build -G Ninja -DOXRSYS_WMR_OPENCV=ON              # native arm64
+cmake --build build --target oxrsys-headset-helper oxrsys_vit_monitor
+drivers/tools/build_basalt.sh                                    # optional: 6DoF head tracking
+sudo python3 drivers/tools/wmr_edid_override.py --install        # once; then replug the video cable
+cd ..
+./scripts/install-wmr.sh        # copies helper/shim/Basalt/x86_64 dylib, sets wired_headset = true, starts the helper
+```
+
+`install-wmr.sh` expects the x86_64 runtime from the section above in
+`oxrsys-src/build/x86` (override with `--x86-build`). Without the EDID override
+macOS keeps the panel off the desktop and the helper logs that no display
+appeared; without Basalt the head is tracked in orientation only at
+`wired_eye_height_m`. Diagnostics: `oxrsys-src/build/drivers/oxrsys_wmr_probe`
+(IMU, `--snapshot DIR` for camera frames) and `oxrsys-headset-helper --monitor`
+(camera window with tracked features). Only one process can hold the headset:
+stop the helper before running the probe. Everything else — controllers,
+troubleshooting, how the helper works — is in `oxrsys-src/docs/platforms/wmr.md`.
 
 ### DXMT — from pristine upstream + our patches
 The `dxmt/` submodule is pinned to a **pristine 3Shain/dxmt** commit; our changes

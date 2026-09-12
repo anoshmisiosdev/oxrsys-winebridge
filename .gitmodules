@@ -11,7 +11,7 @@
 [submodule "oxrsys-src"]
 	path = oxrsys-src
 	url = https://github.com/anoshmisiosdev/oxrsys.git
-	branch = feat/headset-audio
+	branch = feat/monado-wmr-driver
 [submodule "oxrsys-src-jitter"]
 	path = oxrsys-src-jitter
 	url = https://github.com/anoshmisiosdev/oxrsys.git
