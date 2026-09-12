@@ -19,4 +19,4 @@
 [submodule "opencomposite"]
 	path = opencomposite
 	url = https://github.com/anoshmisiosdev/OpenComposite.git
-	branch = merged-fixes
+	branch = macos-metal
