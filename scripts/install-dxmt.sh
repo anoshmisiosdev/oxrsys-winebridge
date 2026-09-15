@@ -10,7 +10,11 @@ DXMT_WIN="$CX/lib/dxmt/x86_64-windows"
 DXMT_UNIX="$CX/lib/dxmt/x86_64-unix"
 
 for f in d3d11.dll d3d10core.dll dxgi.dll winemetal.dll; do
-  src=$(find "$BUILD/src" -name "$f" | head -1)
+  # Newer DXMT builds the real d3d11 as d3d11_dxmt.dll and also emit a small
+  # d3d11.dll that is NOT the Metal backend (it imports no winemetal). Prefer the
+  # _dxmt artifact when it exists, or CrossOver silently falls back to builtin d3d11.
+  src=$(find "$BUILD/src" -name "${f%.dll}_dxmt.dll" | head -1)
+  [ -n "$src" ] || src=$(find "$BUILD/src" -name "$f" | head -1)
   [ -n "$src" ] || { echo "ERROR: $f not found in build"; exit 1; }
   [ -f "$DXMT_WIN/$f.stock" ] || cp "$DXMT_WIN/$f" "$DXMT_WIN/$f.stock"
   cp "$src" "$DXMT_WIN/$f"
