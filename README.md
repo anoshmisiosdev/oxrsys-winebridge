@@ -9,7 +9,7 @@ Windows VR game (x86-64, D3D11, OpenVR or native OpenXR)
   → CrossOver (Rosetta 2)  → OpenComposite openvr_api.dll   (OpenVR → OpenXR; SteamVR titles only)
   → wineopenxr             (PE builtin → __wine_unix_call → native x86_64 .so)
   → OXRSys runtime         (native macOS OpenXR, XR_KHR_metal_enable)
-  → DXMT                   (D3D11 → Metal, zero-copy IMTLD3D11InteropDevice)
+  → DXMT                   (D3D11 → Metal, stock/unpatched, zero-copy shared textures)
   → hardware HEVC          (arm64 out-of-process VideoToolbox helper, ~5 ms)
   → USB (adb tunnel)       → OXRSys client on the Quest → display
 ```
@@ -110,9 +110,10 @@ opencomposite/    submodule → anoshmisiosdev/OpenComposite  (merged-fixes)
 bridge/           submodule → anoshmisiosdev/wineopenxr
                   the PE↔native OpenXR bridge (+ native win32 perf-counter-time ext)
 dxmt/             submodule → 3Shain/dxmt — PRISTINE upstream, pinned to a
-                  verified commit. D3D11→Metal. Our changes are NOT a fork; they
-                  ride as patches/ applied by build-dxmt.sh at build time. The pin
-                  is frozen until a newer upstream commit is verified vs the patches.
+                  verified commit, and built and shipped UNPATCHED. D3D11→Metal.
+                  The bridge drives it through its public D3D11/DXGI surface only
+                  (OpenSharedResource + IDXGIKeyedMutex), so CrossOver's own DXMT
+                  works too and building this submodule is optional.
 oxrsys-src/       submodule → anoshmisiosdev/oxrsys  (feat/monado-wmr-driver)
                   the native macOS OpenXR runtime + arm64 HEVC encoder helper,
                   plus the wired Windows Mixed Reality path: Monado's WMR driver
@@ -122,9 +123,11 @@ oxrsys-src/       submodule → anoshmisiosdev/oxrsys  (feat/monado-wmr-driver)
 oxrsys-src-jitter/ submodule → anoshmisiosdev/oxrsys (fix/ffe-coherent-at-scale)
                   foveated-encoding-at-scale work, kept on its own branch
 test/OpenXRSamples/ submodule → anoshmisiosdev/OpenXRSamples  (touch_controller binding fix)
-patches/          DXMT patch series applied by build-dxmt.sh (in order):
-                  0001-metal-interop.patch (IMTLD3D11InteropDevice, orig. @monofunc),
-                  0002-relax-srgb-import.patch; NOTE-oxrsys.md upstream notes
+patches/          NOTE-oxrsys.md only — upstream notes for the OXRSys author.
+                  The two DXMT patches that used to live here are gone: their
+                  behaviour now lives in bridge/src/pe/openxr.c (shared-resource
+                  import + keyed-mutex sync) and in the runtime's swapchain
+                  allocator. DXMT is used stock.
 docs/             FRESH-INSTALL.md (install diagram + checklist), DESIGN.md,
                   research reports, oxrsys-runtime-fixes.md
 scripts/          build-dxmt.sh, install-dxmt.sh, provision-all-steamvr.sh,
@@ -149,8 +152,9 @@ cd oxrsys-winebridge
 cmake -B bridge/build bridge -G Ninja && cmake --build bridge/build
 ./scripts/install.sh VR                    # VR = your CrossOver bottle name
 
-# 2. DXMT (D3D11 → Metal). Applies the patches/ series to the pinned pristine
-#    upstream dxmt, then builds release; install-dxmt.sh overlays the DLLs.
+# 2. DXMT (D3D11 → Metal), OPTIONAL: only if CrossOver's bundled DXMT is older
+#    than shared-resource support. Builds the pinned pristine upstream dxmt
+#    unpatched; install-dxmt.sh overlays the DLLs.
 ./scripts/build-dxmt.sh
 ./scripts/install-dxmt.sh
 
@@ -206,9 +210,15 @@ graphics binding, the only API that lets DXMT's texture handles cross the bounda
 without a GPU copy.
 
 **OXRSys** is the native macOS OpenXR runtime: it owns the session and swapchain,
-renders the game through **DXMT** (D3D11→Metal, via `IMTLD3D11InteropDevice` —
-zero-copy access to the `MTLTexture` behind a D3D11 texture), encodes, and streams
-to the Quest client.
+renders the game through **DXMT** (D3D11→Metal), encodes, and streams to the
+Quest client. The runtime allocates its swapchain images as Metal *shared*
+textures; the bridge publishes each image's IOSurface mach port and wraps it in
+the D3DKMT shared-resource record DXMT's own `ID3D11Device::OpenSharedResource`
+reads, so the app gets a zero-copy `ID3D11Texture2D` over the runtime's texture
+with **no DXMT patch**. Render completion is fenced through a 1x1
+keyed-mutex texture whose `MTLSharedEvent` the runtime's queue waits on — stock
+`IDXGIKeyedMutex::ReleaseSync` stands in for shared `ID3D11Fence`s, which
+CrossOver's Wine does not implement.
 
 ## Engineering notes (bugs found & fixed)
 

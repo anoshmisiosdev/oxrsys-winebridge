@@ -175,12 +175,14 @@ appeared; without Basalt the head is tracked in orientation only at
 stop the helper before running the probe. Everything else — controllers,
 troubleshooting, how the helper works — is in `oxrsys-src/docs/platforms/wmr.md`.
 
-### DXMT — from pristine upstream + our patches
-The `dxmt/` submodule is pinned to a **pristine 3Shain/dxmt** commit; our changes
-are applied as the `patches/` series by the build script (no fork to maintain).
+### DXMT — pristine upstream, unpatched (optional)
+The `dxmt/` submodule is pinned to a **pristine 3Shain/dxmt** commit and is built
+and installed **unpatched**. The bridge only uses DXMT's public D3D11/DXGI
+surface, so CrossOver's bundled DXMT works too — build this only if the bundled
+one is too old.
 
 ```bash
-./scripts/build-dxmt.sh      # applies patches/ in order, builds RELEASE (-O3)
+./scripts/build-dxmt.sh      # builds pristine upstream DXMT, RELEASE (-O3)
 ./scripts/install-dxmt.sh    # overlays the built DLLs into CrossOver (backs up stock)
 ```
 > **Release is not optional.** A debug/-O0 DXMT is ~4-6× slower and shows up as

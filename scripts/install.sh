@@ -26,11 +26,14 @@ lipo -archs "$(python3 -c "import json;print(json.load(open('$OXR_MANIFEST'))['r
 # dylib inside the Wine process; ad-hoc re-sign locally (verified fix, 2026-09-07)
 codesign --force --sign - "$(python3 -c "import json;print(json.load(open('$OXR_MANIFEST'))['runtime']['library_path'])")"
 
-# DXMT fork check: the bottle must use a DXMT with IMTLD3D11InteropDevice
-if ! grep -rqs "IMTLD3D11InteropDevice" "$CX_WINE/x86_64-windows/"*.dll 2>/dev/null && \
-   ! grep -rqs "IMTLD3D11InteropDevice" "$WINEPREFIX/drive_c/windows/system32/"*.dll 2>/dev/null; then
-  echo "WARNING: no DXMT with IMTLD3D11InteropDevice detected."
-  echo "         Install https://github.com/monofunc/dxmt and select DXMT as Graphics for this bottle,"
+# DXMT check: stock/unpatched DXMT is fine, but it must be present and selected
+# as the bottle's Graphics backend. The bridge reaches Metal through DXMT's
+# ordinary shared-resource path (OpenSharedResource + a keyed-mutex sync
+# carrier), so no DXMT fork or patch is required.
+if ! grep -rqs "winemetal" "$CX_WINE/../dxmt/x86_64-windows/d3d11.dll" 2>/dev/null && \
+   ! grep -rqs "winemetal" "$WINEPREFIX/drive_c/windows/system32/d3d11.dll" 2>/dev/null; then
+  echo "WARNING: no DXMT d3d11 detected."
+  echo "         Select DXMT as the Graphics backend for this bottle (CX_GRAPHICS_BACKEND=dxmt),"
   echo "         or D3D11 session creation will fail (Metal interop unavailable)."
 fi
 

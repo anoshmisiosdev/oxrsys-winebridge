@@ -9,8 +9,10 @@ Research found an existing out-of-tree macOS/CrossOver-26 port —
 monofunc/wineopenxr (LGPL-2.1) — that already solves the hard parts, with a
 BETTER graphics leg than our sketch:
 
-- D3D11 → Metal directly via DXMT's `IMTLD3D11InteropDevice` (zero-copy
-  MTLTexture sharing), not D3D11 → DXVK → Vulkan → MoltenVK.
+- D3D11 → Metal directly via DXMT's shared-texture path (zero-copy MTLTexture
+  sharing), not D3D11 → DXVK → Vulkan → MoltenVK. (This originally used a
+  DXMT fork's `IMTLD3D11InteropDevice`; it now runs on stock DXMT — see
+  "Metal interop on stock DXMT" below.)
 - Native side speaks ratified `XR_KHR_metal_enable`:
   `xrGetMetalGraphicsRequirementsKHR` → runtime's MTLDevice → bridge creates
   MTLCommandQueue → `XrGraphicsBindingMetalKHR{commandQueue}` (session.m:42-120).
@@ -58,9 +60,10 @@ XR_KHR_D3D11_enable → XR_KHR_metal_enable (bridge/src/include/extension_substi
 
 ## Known risks / open items
 
-1. DXMT fork requirement: bridge needs monofunc/dxmt installed in CrossOver
-   and selected as the bottle's Graphics backend (IMTLD3D11InteropDevice is
-   their addition). Stock CrossOver DXMT lacks the interop interface.
+1. DXMT must be selected as the bottle's Graphics backend, but no fork or
+   patch is needed any more (see below). The residual risk is that the bridge
+   writes/reads DXMT's *private* D3DKMT shared-resource record; it validates
+   the layout at session creation and refuses to run if it ever changes.
 2. OXRSys single-instance/single-session globals; 64-bit PE only (handles are
    raw pointers as uint64).
 3. OXRSys negotiation rejects loaders demanding minApiVersion ≥ 1.1
@@ -83,3 +86,49 @@ M2  Install: CrossOver payload + bottle registry + DXMT fork.     ← scripted t
 M3  hello_xr.exe (D3D11) in a bottle renders on Quest via OXRSys. ← needs headset
 M4  OpenComposite PE openvr_api.dll in front → first OpenVR title.
 M5  Upstream fixes: OXRSys Vulkan-path sync; more formats; QPC converters.
+
+
+## Metal interop on stock DXMT (2026-09-22)
+
+The bridge used to require two DXMT patches (`IMTLD3D11InteropDevice` for
+importing an external `MTLTexture` and reading a fence's `MTLSharedEvent`, plus
+a relaxation of that importer's format/usage validation). Both are gone. What
+replaced them:
+
+**Swapchain images.** OXRSys allocates its Metal swapchain images with
+`newSharedTextureWithDescriptor:` (and `MTLTextureUsagePixelFormatView`), so each
+image has an IOSurface that can be published as a mach send right. The bridge's
+unix half does `newSharedTextureHandle` → `createMachPort` →
+`bootstrap_register2` under a unique name, and the PE half wraps that name (plus
+the `D3D11_TEXTURE2D_DESC1` the app should see) in the private runtime data of a
+`D3DKMTCreateAllocation2` resource, shaped exactly like the record DXMT writes
+for its own shared textures. Plain `ID3D11Device::OpenSharedResource` then
+returns an `ID3D11Texture2D` backed by the runtime's texture.
+
+That also removes the need for patch 2: DXMT's shared-resource import performs
+no format or usage validation (the custom `ImportMTLTexture2D` did), so passing
+the typeless parent format keeps working. The sRGB-over-typeless *view* DXMT
+creates is what needs `MTLTextureUsagePixelFormatView`, which the runtime now
+sets.
+
+**Render-completion fence.** The obvious replacement — `CreateFence(SHARED)` +
+`CreateSharedHandle` + reading the event name back — does not work: CrossOver's
+Wine answers `D3DKMTQueryResourceInfoFromNtHandle` on a sync-object handle with
+`STATUS_OBJECT_TYPE_MISMATCH`, which also breaks DXMT's own `OpenSharedFence`.
+Instead the session creates a 1x1 `D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX`
+texture. DXMT backs its keyed mutex with an `MTLSharedEvent` and stores that
+event's mach service name as the mutex's private runtime data, which
+`D3DKMTOpenKeyedMutex2` hands back; the unix half opens the same event with
+`newSharedEventWithMachPort:`. At `xrReleaseSwapchainImage` the bridge does
+`AcquireSync`/`ReleaseSync` on that carrier, which makes DXMT encode
+`waitEvent(n)` + `signalEvent(n+1)` on its own queue behind everything the app
+encoded — the same effect as `ID3D11DeviceContext4::Signal`. The value is a plain
+release count; the unix half confirms on the first release that the event really
+reaches it, and disables the fence rather than risk a queue wait that never
+retires.
+
+**Layout risk.** `dxmt_shared_resource_data` is DXMT-private. At session
+creation the bridge has stock DXMT write one (for the sync carrier) and checks
+the record size and every field — name, dimension, full desc, mutex handle —
+against what it passed. A DXMT that reorders it fails `xrCreateSession` with a
+named error instead of importing misparsed bytes.

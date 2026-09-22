@@ -1,5 +1,7 @@
 #!/bin/bash
-# Install the monofunc DXMT fork (with IMTLD3D11InteropDevice) into CrossOver.
+# Install a locally built, unpatched (stock) DXMT into CrossOver.
+# Only needed if CrossOver's bundled DXMT predates shared-resource support;
+# the bridge drives DXMT through its ordinary public D3D11/DXGI surface.
 # CrossOver keeps DXMT in its own payload dir: lib/dxmt/{x86_64-windows,x86_64-unix}.
 # We back up the stock files once, then overlay the fork's builds.
 set -euo pipefail

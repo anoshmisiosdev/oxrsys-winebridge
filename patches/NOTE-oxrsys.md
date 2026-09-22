@@ -1,30 +1,34 @@
 # Note for the OXRSys author (draft — not sent)
 
+_Updated 2026-09-22: item 1 is implemented on `feat/shared-swapchain-textures`._
+
 Context: OXRSys works as the OpenXR runtime behind a Wine bridge on macOS.
 We run Windows D3D11 titles through Wine + monofunc/wineopenxr + DXMT, with
 OXRSys as the native runtime underneath; the full chain renders end-to-end
 (verified 2026-09-07, 900 frames, both eyes). Two observations from that
 integration work, referenced against the OXRSys tree (runtime/src):
 
-## 1. Swapchain texture usage flags vs external interop consumers
+## 1. Swapchain images should be shareable, with PixelFormatView
 
-Swapchain images are created with only
-`MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead`
-(`Swapchain.mm:217`, and the staging copies at `Swapchain.mm:257`).
+Swapchain images were created as plain private textures with only
+`MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead`. Two consequences
+for anything outside the runtime's own Metal stack:
 
-That is correct and sufficient for sRGB<->linear reinterpretation — Metal
-exempts same-family sRGB casts from `MTLTextureUsagePixelFormatView` — but
-external consumers that import these textures (e.g. a D3D11 translation
-layer resolving a typeless `DXGI_FORMAT_*_TYPELESS` desc) tend to expect
-`PixelFormatView` for any format casting and reject the import. We hit
-exactly this in DXMT and relaxed its import validation upstream, but it
-would help other interop consumers to either:
+- A plain (non-shared) texture cannot produce a `MTLSharedTextureHandle`, so
+  an interop consumer in another graphics stack cannot adopt the image and has
+  to blit into it instead of rendering into it directly.
+- Without `MTLTextureUsagePixelFormatView` a consumer cannot create a view in a
+  different-but-compatible pixel format. Metal exempts same-family sRGB casts,
+  so the runtime's own use is fine, but a D3D11 translation layer resolving a
+  typeless `DXGI_FORMAT_*_TYPELESS` desc does create such a view.
 
-- add `MTLTextureUsagePixelFormatView` to the swapchain image descriptor
-  (cost is typically nil on Apple GPUs for these formats), or
-- document the format/usage contract for external consumers: images are
-  concrete (possibly sRGB) formats, `RenderTarget|ShaderRead` only, and
-  same-family sRGB casts are the only reinterpretation guaranteed to work.
+Proposed (and implemented on our branch `feat/shared-swapchain-textures`):
+allocate the images with `newSharedTextureWithDescriptor:` and add
+`MTLTextureUsagePixelFormatView`. Both cost nothing on Apple GPUs for these
+formats, and the shared allocation falls back to a private texture if a
+descriptor is ever unshareable. With that in place a Wine/D3D11 client renders
+zero-copy straight into the runtime's swapchain images, with no changes to the
+D3D11->Metal translation layer at all.
 
 ## 2. Known gap: Vulkan-path streaming lacks GPU sync
 
