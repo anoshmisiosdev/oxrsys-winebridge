@@ -13,6 +13,11 @@
  *   fence  - GPU-sync probe: capture/substitute the Metal event behind an
  *            ID3D11Fence and watch ID3D11DeviceContext4::Signal reach it.
  *   both   - probe + fence + xr (default).
+ *   vprt   - layered rendering into a 2-slice Texture2DArray (VS/GS-written
+ *            SV_RenderTargetArrayIndex, per-slice RTVs, Unity-like MSAA+depth
+ *            variants) on (a) a plain D3DMetal texture and (b) a substituted
+ *            arraySize=2 swapchain image; logs the D3D11 OPTIONS* caps.
+ *            DMS_TEST_NO_XR=1 skips (b). caps - log the caps only.
  *
  * xr env knobs: DMS_TEST_FRAMES, DMS_TEST_FORMAT (DXGI), DMS_TEST_ARRAY=2,
  * DMS_TEST_EXTRA=1 (UpdateSubresource/CopySubresourceRegion into an image),
@@ -463,6 +468,460 @@ static int run_xr(HMODULE dll, ID3D11Device *dev, ID3D11DeviceContext *ctx, int 
     return 0;
 }
 
+/* ---- VPRT: layered rendering into a 2-slice Texture2DArray -----------------
+ * What Unity's single-pass instanced stereo does on D3D11: one DrawInstanced
+ * with 2x the instances into an RTV spanning both slices, and the VERTEX
+ * shader writes SV_RenderTargetArrayIndex = instanceID & 1. Three routes:
+ *   vs    - VS writes SV_RenderTargetArrayIndex (needs D3D11.3 OPTIONS3 VPRT)
+ *   gs    - classic geometry shader writes SV_RenderTargetArrayIndex
+ *   slice - one RTV per slice, one draw each (what multi-pass stereo does)
+ * Clear blue, instance/slice 0 draws red, instance/slice 1 green. Expected:
+ * slice 0 red, slice 1 green. "Layer lost" shows as slice 0 green (instance 1
+ * drawn over instance 0) and slice 1 blue (never touched) */
+
+static void log_caps(ID3D11Device *dev)
+{
+    D3D11_FEATURE_DATA_D3D11_OPTIONS o = {};
+    D3D11_FEATURE_DATA_D3D11_OPTIONS1 o1 = {};
+    D3D11_FEATURE_DATA_D3D11_OPTIONS2 o2 = {};
+    D3D11_FEATURE_DATA_D3D11_OPTIONS3 o3 = {};
+    D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS x = {};
+    HRESULT h, h1, h2, h3, hx;
+    h = dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &o, sizeof(o));
+    h1 = dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS1, &o1, sizeof(o1));
+    h2 = dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &o2, sizeof(o2));
+    h3 = dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS3, &o3, sizeof(o3));
+    hx = dev->CheckFeatureSupport(D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS, &x, sizeof(x));
+    printf("CAPS feature level 0x%x\n", dev->GetFeatureLevel());
+    printf("CAPS D3D11_OPTIONS hr=0x%08lx: OutputMergerLogicOp=%d UAVOnlyRenderingForcedSampleCount=%d "
+           "DiscardAPIsSeenByDriver=%d FlagsForUpdateAndCopySeenByDriver=%d ClearView=%d "
+           "CopyWithOverlap=%d ConstantBufferPartialUpdate=%d ConstantBufferOffsetting=%d "
+           "MapNoOverwriteOnDynamicConstantBuffer=%d MapNoOverwriteOnDynamicBufferSRV=%d "
+           "MultisampleRTVWithForcedSampleCountOne=%d SAD4ShaderInstructions=%d ExtendedDoublesShaderInstructions=%d "
+           "ExtendedResourceSharing=%d\n", (unsigned long)h, o.OutputMergerLogicOp,
+           o.UAVOnlyRenderingForcedSampleCount, o.DiscardAPIsSeenByDriver, o.FlagsForUpdateAndCopySeenByDriver,
+           o.ClearView, o.CopyWithOverlap, o.ConstantBufferPartialUpdate, o.ConstantBufferOffsetting,
+           o.MapNoOverwriteOnDynamicConstantBuffer, o.MapNoOverwriteOnDynamicBufferSRV,
+           o.MultisampleRTVWithForcedSampleCountOne, o.SAD4ShaderInstructions,
+           o.ExtendedDoublesShaderInstructions, o.ExtendedResourceSharing);
+    printf("CAPS D3D11_OPTIONS1 hr=0x%08lx: TiledResourcesTier=%d MinMaxFiltering=%d "
+           "ClearViewAlsoSupportsDepthOnlyFormats=%d MapOnDefaultBuffers=%d\n", (unsigned long)h1,
+           o1.TiledResourcesTier, o1.MinMaxFiltering, o1.ClearViewAlsoSupportsDepthOnlyFormats, o1.MapOnDefaultBuffers);
+    printf("CAPS D3D11_OPTIONS2 hr=0x%08lx: PSSpecifiedStencilRef=%d TypedUAVLoadAdditionalFormats=%d ROVs=%d "
+           "ConservativeRasterizationTier=%d TiledResourcesTier=%d MapOnDefaultTextures=%d StandardSwizzle=%d "
+           "UnifiedMemoryArchitecture=%d\n", (unsigned long)h2, o2.PSSpecifiedStencilRefSupported,
+           o2.TypedUAVLoadAdditionalFormats, o2.ROVsSupported, o2.ConservativeRasterizationTier,
+           o2.TiledResourcesTier, o2.MapOnDefaultTextures, o2.StandardSwizzle, o2.UnifiedMemoryArchitecture);
+    printf("CAPS D3D11_OPTIONS3 hr=0x%08lx: VPAndRTArrayIndexFromAnyShaderFeedingRasterizer=%d\n",
+           (unsigned long)h3, o3.VPAndRTArrayIndexFromAnyShaderFeedingRasterizer);
+    printf("CAPS D3D10_X_HARDWARE_OPTIONS hr=0x%08lx: ComputeShaders_Plus_RawAndStructuredBuffers_Via_Shader_4_x=%d\n",
+           (unsigned long)hx, x.ComputeShaders_Plus_RawAndStructuredBuffers_Via_Shader_4_x);
+}
+
+static const char *vprt_src =
+    "struct VO { float4 pos : SV_POSITION; float4 col : COLOR0; uint rt : SV_RenderTargetArrayIndex; };\n"
+    "struct VU { float4 pos : SV_POSITION; float4 col : COLOR0; uint rt : SV_RenderTargetArrayIndex; uint eye : BLENDINDICES0; };\n"
+    "struct PO { float4 pos : SV_POSITION; float4 col : COLOR0; };\n"
+    "struct VG { float4 pos : SV_POSITION; float4 col : COLOR0; uint inst : TEXCOORD0; };\n"
+    "float4 tri(uint id) { float2 uv = float2((id << 1) & 2, id & 2);\n"
+    "  return float4(uv * float2(2, -2) + float2(-1, 1), 0.5, 1); }\n"
+    "float4 col(uint i) { return i == 0 ? float4(1, 0, 0, 1) : float4(0, 1, 0, 1); }\n"
+    "VO vs_vprt(uint id : SV_VertexID, uint inst : SV_InstanceID) {\n"
+    "  VO o; o.pos = tri(id); o.col = col(inst & 1); o.rt = inst & 1; return o; }\n"
+    "VU vs_unity(float3 p : POSITION, uint inst : SV_InstanceID) {\n"
+    "  VU o; o.pos = float4(p, 1); o.col = col(inst % 2); o.rt = inst % 2; o.eye = inst % 2; return o; }\n"
+    "VG vs_gs(uint id : SV_VertexID, uint inst : SV_InstanceID) {\n"
+    "  VG o; o.pos = tri(id); o.col = col(inst & 1); o.inst = inst & 1; return o; }\n"
+    "[maxvertexcount(3)] void gs(triangle VG i[3], inout TriangleStream<VO> s) {\n"
+    "  for (int k = 0; k < 3; k++) { VO o; o.pos = i[k].pos; o.col = i[k].col; o.rt = i[k].inst; s.Append(o); } }\n"
+    "float4 vs_plain(uint id : SV_VertexID) : SV_POSITION { return tri(id); }\n"
+    "float4 ps(VO i) : SV_TARGET { return i.col; }\n"
+    "float4 ps_nort(PO i) : SV_TARGET { return i.col; }\n"
+    "float4 ps_unity(VU i) : SV_TARGET { return i.col; }\n"
+    "float4 ps_red() : SV_TARGET { return float4(1, 0, 0, 1); }\n"
+    "float4 ps_green() : SV_TARGET { return float4(0, 1, 0, 1); }\n"
+    "Texture2DMSArray<float4> ms : register(t0);\n"
+    "float4 ps_load0(float4 p : SV_POSITION) : SV_TARGET { return ms.Load(int3(p.xy, 0), 0); }\n"
+    "float4 ps_load1(float4 p : SV_POSITION) : SV_TARGET { return ms.Load(int3(p.xy, 1), 0); }\n";
+
+struct vprt_shaders
+{
+    ID3D11VertexShader *vs_vprt, *vs_gs, *vs_plain, *vs_unity;
+    ID3D11GeometryShader *gs;
+    ID3D11PixelShader *ps, *ps_red, *ps_green, *ps_nort, *ps_unity, *ps_load0, *ps_load1;
+    ID3D11RasterizerState *rs;
+    ID3D11InputLayout *il;
+    ID3D11Buffer *vb, *ib;
+    ID3D11DepthStencilState *dss;
+};
+
+static bool vprt_compile(ID3D11Device *dev, vprt_shaders *s)
+{
+    struct { const char *entry, *target; void **out; int kind; } list[] = {
+        { "vs_vprt", "vs_5_0", (void **)&s->vs_vprt, 0 }, { "vs_gs", "vs_5_0", (void **)&s->vs_gs, 0 },
+        { "vs_plain", "vs_5_0", (void **)&s->vs_plain, 0 }, { "vs_unity", "vs_5_0", (void **)&s->vs_unity, 0 },
+        { "gs", "gs_5_0", (void **)&s->gs, 1 },
+        { "ps", "ps_5_0", (void **)&s->ps, 2 }, { "ps_red", "ps_5_0", (void **)&s->ps_red, 2 },
+        { "ps_green", "ps_5_0", (void **)&s->ps_green, 2 }, { "ps_nort", "ps_5_0", (void **)&s->ps_nort, 2 },
+        { "ps_unity", "ps_5_0", (void **)&s->ps_unity, 2 },
+        { "ps_load0", "ps_5_0", (void **)&s->ps_load0, 2 }, { "ps_load1", "ps_5_0", (void **)&s->ps_load1, 2 },
+    };
+    memset(s, 0, sizeof(*s));
+    for (auto &e : list) {
+        ID3DBlob *b = nullptr, *err = nullptr;
+        HRESULT hr = D3DCompile(vprt_src, strlen(vprt_src), nullptr, nullptr, nullptr, e.entry, e.target, 0, 0, &b, &err);
+        if (FAILED(hr)) { printf("VPRT: compile %s failed: %s\n", e.entry, err ? (char *)err->GetBufferPointer() : "?"); return false; }
+        if (e.kind == 0) hr = dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, (ID3D11VertexShader **)e.out);
+        else if (e.kind == 1) hr = dev->CreateGeometryShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, (ID3D11GeometryShader **)e.out);
+        else hr = dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, (ID3D11PixelShader **)e.out);
+        if (FAILED(hr)) printf("VPRT: Create shader %s hr=0x%08lx\n", e.entry, (unsigned long)hr);
+        if (e.out == (void **)&s->vs_unity) {
+            D3D11_INPUT_ELEMENT_DESC ie = { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 };
+            dev->CreateInputLayout(&ie, 1, b->GetBufferPointer(), b->GetBufferSize(), &s->il);
+        }
+        b->Release();
+    }
+    D3D11_RASTERIZER_DESC rsd = {}; rsd.FillMode = D3D11_FILL_SOLID; rsd.CullMode = D3D11_CULL_NONE; rsd.DepthClipEnable = TRUE;
+    dev->CreateRasterizerState(&rsd, &s->rs);
+    /* full-screen quad, indexed */
+    static const float v[] = { -1, -1, 0.5f, -1, 1, 0.5f, 1, 1, 0.5f, 1, -1, 0.5f };
+    static const uint16_t idx[] = { 0, 1, 2, 0, 2, 3 };
+    D3D11_BUFFER_DESC bd = { sizeof(v), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+    D3D11_SUBRESOURCE_DATA sd = { v, 0, 0 };
+    dev->CreateBuffer(&bd, &sd, &s->vb);
+    bd.ByteWidth = sizeof(idx); bd.BindFlags = D3D11_BIND_INDEX_BUFFER; sd.pSysMem = idx;
+    dev->CreateBuffer(&bd, &sd, &s->ib);
+    D3D11_DEPTH_STENCIL_DESC dsd = {}; dsd.DepthEnable = TRUE; dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    dsd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    dev->CreateDepthStencilState(&dsd, &s->dss);
+    return true;
+}
+
+enum { VPRT_VS, VPRT_GS, VPRT_SLICE, VPRT_VS_NORT, VPRT_UNITY, VPRT_UNITY_DEPTH, VPRT_UNITY_MSAA,
+       VPRT_MSAA_NODEPTH, VPRT_MSAA_SLICE, VPRT_MSAA_LOAD, VPRT_MSAA_CLEARONLY, VPRT_MSAA_SLICE_DEPTH, VPRT_NROUTES };
+static const char *vprt_route_name[] = { "VS SV_RenderTargetArrayIndex", "GS SV_RenderTargetArrayIndex", "per-slice RTVs",
+    "VS rtai, PS input w/o rtai", "Unity-like indexed+IA+BLENDIDX", "Unity-like + 2-slice depth", "Unity-like MSAA4x+resolve",
+    "MSAA4x layered, no depth, resolve", "MSAA4x per-slice RTVs, resolve", "MSAA4x layered, shader Load", "MSAA4x clear per slice, resolve",
+    "MSAA4x per-slice RTV+DSV (multi-pass)" };
+
+/* Render one route into tex (a 2-slice array); DXGI view format fmt */
+static bool vprt_render(ID3D11Device *dev, ID3D11DeviceContext *ctx, const vprt_shaders *s,
+                        ID3D11Texture2D *tex, DXGI_FORMAT fmt, int route)
+{
+    D3D11_TEXTURE2D_DESC td; tex->GetDesc(&td);
+    ID3D11Texture2D *target = tex, *msaa = nullptr, *depth = nullptr;
+    ID3D11DepthStencilView *dsv = nullptr;
+    bool is_msaa = route >= VPRT_UNITY_MSAA;
+    if (is_msaa) {
+        D3D11_TEXTURE2D_DESC md = td; md.Format = fmt; md.SampleDesc.Count = 4; md.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE; md.MiscFlags = 0;
+        struct dmsubst_params p = {}; p.op = DMSUBST_OP_ARM; p.flags = DMSUBST_ARM_PROBE; dms(&p);
+        HRESULT hr = dev->CreateTexture2D(&md, nullptr, &msaa);
+        p = {}; p.op = DMSUBST_OP_DISARM; dms(&p);
+        static int once;
+        if (!once++)
+            printf("VPRT MSAA color D3D11 %ux%u arr=%u samples=%u -> Metal type=%u arr=%u fmt=%u usage=0x%llx (via %s, %u creations)\n",
+                   md.Width, md.Height, md.ArraySize, md.SampleDesc.Count, p.desc_texture_type, p.desc_array_length,
+                   p.desc_pixel_format, (unsigned long long)p.desc_usage, p.where, p.seen);
+        if (FAILED(hr)) { printf("VPRT: MSAA array texture hr=0x%08lx\n", (unsigned long)hr); return false; }
+        target = msaa;
+    }
+    ID3D11DepthStencilView *dsone[2] = {};
+    if (route == VPRT_UNITY_DEPTH || route == VPRT_UNITY_MSAA || route == VPRT_MSAA_LOAD || route == VPRT_MSAA_SLICE_DEPTH) {
+        D3D11_TEXTURE2D_DESC dd = td; dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        dd.MiscFlags = 0; dd.SampleDesc.Count = is_msaa ? 4 : 1;
+        if (getenv("DMS_TEST_DEPTH_FMT")) dd.Format = (DXGI_FORMAT)atoi(getenv("DMS_TEST_DEPTH_FMT"));
+        {
+            struct dmsubst_params p = {}; p.op = DMSUBST_OP_ARM; p.flags = DMSUBST_ARM_PROBE; dms(&p);
+            HRESULT hr = dev->CreateTexture2D(&dd, nullptr, &depth);
+            p = {}; p.op = DMSUBST_OP_DISARM; dms(&p);
+            static int once[2];
+            if (!once[dd.SampleDesc.Count > 1]++)
+                printf("VPRT depth D3D11 fmt=%d %ux%u arr=%u samples=%u hr=0x%08lx -> Metal type=%u arr=%u fmt=%u usage=0x%llx (via %s, %u creations)\n",
+                       (int)dd.Format, dd.Width, dd.Height, dd.ArraySize, dd.SampleDesc.Count, (unsigned long)hr, p.desc_texture_type,
+                       p.desc_array_length, p.desc_pixel_format, (unsigned long long)p.desc_usage, p.where, p.seen);
+        }
+        D3D11_DEPTH_STENCIL_VIEW_DESC dvd = {}; dvd.Format = dd.Format;
+        if (dd.SampleDesc.Count > 1) { dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY; dvd.Texture2DMSArray.ArraySize = 2; }
+        else { dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY; dvd.Texture2DArray.ArraySize = 2; }
+        if (!depth || FAILED(dev->CreateDepthStencilView(depth, &dvd, &dsv))) printf("VPRT: depth array DSV failed\n");
+        else ctx->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+        for (int i = 0; i < 2 && depth && route == VPRT_MSAA_SLICE_DEPTH; i++) {
+            D3D11_DEPTH_STENCIL_VIEW_DESC d1 = dvd;
+            d1.Texture2DMSArray.FirstArraySlice = i; d1.Texture2DMSArray.ArraySize = 1;
+            dev->CreateDepthStencilView(depth, &d1, &dsone[i]);
+        }
+    }
+    D3D11_RENDER_TARGET_VIEW_DESC rd = {};
+    rd.Format = fmt; rd.ViewDimension = msaa ? D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY : D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+    rd.Texture2DArray.FirstArraySlice = 0; rd.Texture2DArray.ArraySize = 2;
+    if (msaa) { rd.Texture2DMSArray.FirstArraySlice = 0; rd.Texture2DMSArray.ArraySize = 2; }
+    ID3D11RenderTargetView *all = nullptr, *one[2] = {};
+    if (FAILED(dev->CreateRenderTargetView(target, &rd, &all))) { printf("VPRT: 2-slice RTV failed\n"); return false; }
+    ID3D11RenderTargetView *msone[2] = {};
+    for (int i = 0; i < 2; i++) {
+        D3D11_RENDER_TARGET_VIEW_DESC r1 = {}; r1.Format = fmt; r1.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+        r1.Texture2DArray.FirstArraySlice = i; r1.Texture2DArray.ArraySize = 1;
+        dev->CreateRenderTargetView(tex, &r1, &one[i]);
+        if (msaa) {
+            r1.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY; r1.Texture2DMSArray.FirstArraySlice = i; r1.Texture2DMSArray.ArraySize = 1;
+            dev->CreateRenderTargetView(msaa, &r1, &msone[i]);
+        }
+    }
+    const float blue[4] = { 0, 0, 1, 1 };
+    ctx->ClearRenderTargetView(all, blue);
+    if (msaa) { const float black[4] = { 0, 0, 0, 1 }; ctx->ClearRenderTargetView(one[0], black); ctx->ClearRenderTargetView(one[1], black); }
+    D3D11_VIEWPORT vp = { 0, 0, (FLOAT)td.Width, (FLOAT)td.Height, 0, 1 };
+    ctx->RSSetViewports(1, &vp); ctx->RSSetState(s->rs);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->IASetInputLayout(nullptr);
+    ctx->OMSetDepthStencilState(dsv ? s->dss : nullptr, 0);
+    if (route == VPRT_SLICE) {
+        ctx->VSSetShader(s->vs_plain, nullptr, 0); ctx->GSSetShader(nullptr, nullptr, 0);
+        for (int i = 0; i < 2; i++) {
+            ctx->OMSetRenderTargets(1, &one[i], nullptr);
+            ctx->PSSetShader(i ? s->ps_green : s->ps_red, nullptr, 0);
+            ctx->Draw(3, 0);
+        }
+    } else if (route == VPRT_MSAA_SLICE_DEPTH) {
+        /* per-eye passes as multi-pass stereo does, each with its own DSV slice.
+         * Slice 0's depth is cleared to 0 after slice 1's to 1, so a DSV that
+         * maps to the wrong slice shows: expected red fails the depth test
+         * (slice 0 stays black), green passes */
+        ctx->ClearDepthStencilView(dsone[1], D3D11_CLEAR_DEPTH, 1.0f, 0);
+        ctx->ClearDepthStencilView(dsone[0], D3D11_CLEAR_DEPTH, 0.0f, 0);
+        ctx->OMSetDepthStencilState(s->dss, 0);
+        ctx->VSSetShader(s->vs_plain, nullptr, 0); ctx->GSSetShader(nullptr, nullptr, 0);
+        const float black[4] = { 0, 0, 0, 1 };
+        for (int i = 0; i < 2; i++) {
+            ctx->ClearRenderTargetView(msone[i], black);
+            ctx->OMSetRenderTargets(1, &msone[i], dsone[i]);
+            ctx->PSSetShader(i ? s->ps_green : s->ps_red, nullptr, 0);
+            ctx->Draw(3, 0);
+        }
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        for (int i = 0; i < 2; i++)
+            ctx->ResolveSubresource(tex, D3D11CalcSubresource(0, i, 1), msaa, D3D11CalcSubresource(0, i, 1), fmt);
+    } else if (route == VPRT_MSAA_SLICE || route == VPRT_MSAA_CLEARONLY) {
+        const float c[2][4] = { { 1, 0, 0, 1 }, { 0, 1, 0, 1 } };
+        ctx->VSSetShader(s->vs_plain, nullptr, 0); ctx->GSSetShader(nullptr, nullptr, 0);
+        for (int i = 0; i < 2; i++) {
+            if (route == VPRT_MSAA_CLEARONLY) { ctx->ClearRenderTargetView(msone[i], c[i]); continue; }
+            ctx->OMSetRenderTargets(1, &msone[i], nullptr);
+            ctx->PSSetShader(i ? s->ps_green : s->ps_red, nullptr, 0);
+            ctx->Draw(3, 0);
+        }
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        for (int i = 0; i < 2; i++)
+            ctx->ResolveSubresource(tex, D3D11CalcSubresource(0, i, 1), msaa, D3D11CalcSubresource(0, i, 1), fmt);
+    } else if (route >= VPRT_UNITY) {
+        UINT stride = 12, off = 0;
+        ctx->OMSetRenderTargets(1, &all, dsv);
+        ctx->IASetInputLayout(s->il);
+        ctx->IASetVertexBuffers(0, 1, &s->vb, &stride, &off);
+        ctx->IASetIndexBuffer(s->ib, DXGI_FORMAT_R16_UINT, 0);
+        ctx->VSSetShader(s->vs_unity, nullptr, 0); ctx->GSSetShader(nullptr, nullptr, 0);
+        ctx->PSSetShader(s->ps_unity, nullptr, 0);
+        ctx->DrawIndexedInstanced(6, 2, 0, 0, 0);
+        if (msaa && route == VPRT_MSAA_LOAD) {
+            /* read the MSAA array back with Texture2DMSArray.Load (sample 0) instead of ResolveSubresource */
+            ctx->OMSetRenderTargets(0, nullptr, nullptr);
+            ID3D11ShaderResourceView *srv = nullptr;
+            D3D11_SHADER_RESOURCE_VIEW_DESC sv = {}; sv.Format = fmt; sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY;
+            sv.Texture2DMSArray.FirstArraySlice = 0; sv.Texture2DMSArray.ArraySize = 2;
+            dev->CreateShaderResourceView(msaa, &sv, &srv);
+            ctx->IASetInputLayout(nullptr);
+            ctx->VSSetShader(s->vs_plain, nullptr, 0);
+            ctx->OMSetDepthStencilState(nullptr, 0);
+            for (int i = 0; i < 2; i++) {
+                ctx->OMSetRenderTargets(1, &one[i], nullptr);
+                ctx->PSSetShader(i ? s->ps_load1 : s->ps_load0, nullptr, 0);
+                ctx->PSSetShaderResources(0, 1, &srv);
+                ctx->Draw(3, 0);
+            }
+            ID3D11ShaderResourceView *nul = nullptr; ctx->PSSetShaderResources(0, 1, &nul);
+            srv->Release();
+        } else if (msaa) {
+            ctx->OMSetRenderTargets(0, nullptr, nullptr);
+            for (int i = 0; i < 2; i++)
+                ctx->ResolveSubresource(tex, D3D11CalcSubresource(0, i, 1), msaa, D3D11CalcSubresource(0, i, 1), fmt);
+        }
+    } else {
+        ctx->OMSetRenderTargets(1, &all, nullptr);
+        ctx->VSSetShader(route == VPRT_GS ? s->vs_gs : s->vs_vprt, nullptr, 0);
+        ctx->GSSetShader(route == VPRT_GS ? s->gs : nullptr, nullptr, 0);
+        ctx->PSSetShader(route == VPRT_VS_NORT ? s->ps_nort : s->ps, nullptr, 0);
+        ctx->DrawInstanced(3, 2, 0, 0);
+    }
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    ctx->OMSetDepthStencilState(nullptr, 0);
+    all->Release();
+    for (int i = 0; i < 2; i++) { if (one[i]) one[i]->Release(); if (msone[i]) msone[i]->Release(); }
+    if (dsv) dsv->Release();
+    for (int i = 0; i < 2; i++) if (dsone[i]) dsone[i]->Release();
+    if (depth) depth->Release();
+    if (msaa) msaa->Release();
+    return true;
+}
+
+/* D3D11-side readback of the centre texel of both slices through a staging copy */
+static void vprt_read_d3d(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11Texture2D *tex, uint8_t out[2][4])
+{
+    D3D11_TEXTURE2D_DESC td; tex->GetDesc(&td);
+    D3D11_TEXTURE2D_DESC sd = td; sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
+    ID3D11Texture2D *st = nullptr;
+    memset(out, 0xee, 8);
+    if (FAILED(dev->CreateTexture2D(&sd, nullptr, &st))) { printf("VPRT: staging failed\n"); return; }
+    ctx->CopyResource(st, tex);
+    for (int i = 0; i < 2; i++) {
+        D3D11_MAPPED_SUBRESOURCE m;
+        UINT sub = D3D11CalcSubresource(0, i, td.MipLevels);
+        if (SUCCEEDED(ctx->Map(st, sub, D3D11_MAP_READ, 0, &m))) {
+            memcpy(out[i], (uint8_t *)m.pData + (td.Height / 2) * m.RowPitch + (td.Width / 2) * 4, 4);
+            ctx->Unmap(st, sub);
+        }
+    }
+    st->Release();
+}
+
+static int vprt_judge(const char *target, int route, const uint8_t px[2][4], bool bgra, const char *how)
+{
+    /* red / green / blue by channel (RGBA or BGRA byte order) */
+    auto name = [bgra](const uint8_t *p) -> const char * {
+        int r = bgra ? p[2] : p[0], g = p[1], b = bgra ? p[0] : p[2];
+        if (r > 200 && g < 50 && b < 50) return "red";
+        if (g > 200 && r < 50 && b < 50) return "green";
+        if (b > 200 && r < 50 && g < 50) return "blue";
+        if (!r && !g && !b) return "zero";
+        return "other";
+    };
+    const char *s0 = name(px[0]), *s1 = name(px[1]);
+    const char *want0 = route == VPRT_MSAA_SLICE_DEPTH ? "zero" : "red";
+    int ok = !strcmp(s0, want0) && !strcmp(s1, "green");
+    printf("VPRT %-9s %-30s (%s): slice0 %02x%02x%02x%02x=%s slice1 %02x%02x%02x%02x=%s -> %s\n", target,
+           vprt_route_name[route], how, px[0][0], px[0][1], px[0][2], px[0][3], s0,
+           px[1][0], px[1][1], px[1][2], px[1][3], s1,
+           ok ? "PASS" : (!strcmp(s0, "green") && !strcmp(s1, "blue")) ? "FAIL (layer index lost: both instances in slice 0)" : "FAIL");
+    return ok;
+}
+
+static void vprt_read_mtl(uint64_t mtl, uint8_t out[2][4])
+{
+    for (int i = 0; i < 2; i++) {
+        struct dmsubst_params p = {}; p.op = DMSUBST_OP_READBACK; p.mtl_texture = mtl; p.slice = i;
+        memset(out[i], 0xee, 4);
+        if (!mtl) continue;
+        /* centre texel; the Metal texture's size is what we created */
+        p.x = 32; p.y = 32;
+        if (!dms(&p)) memcpy(out[i], p.raw, 4);
+    }
+}
+
+/* (a) a plain D3DMetal-owned 64x64 2-slice texture, no substitution */
+static int run_vprt_plain(ID3D11Device *dev, ID3D11DeviceContext *ctx, DXGI_FORMAT res_fmt, DXGI_FORMAT view_fmt)
+{
+    vprt_shaders s; if (!vprt_compile(dev, &s)) return 1;
+    int pass = 0;
+    for (int route = 0; route < VPRT_NROUTES; route++) {
+        D3D11_TEXTURE2D_DESC d = {}; d.Width = d.Height = 64; d.MipLevels = 1; d.ArraySize = 2; d.Format = res_fmt;
+        d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        struct dmsubst_params p = {}; p.op = DMSUBST_OP_ARM; p.flags = DMSUBST_ARM_PROBE | DMSUBST_ARM_CAPTURE; dms(&p);
+        ID3D11Texture2D *tex = nullptr;
+        HRESULT hr = dev->CreateTexture2D(&d, nullptr, &tex);
+        p = {}; p.op = DMSUBST_OP_DISARM; dms(&p);
+        if (FAILED(hr)) { printf("VPRT: CreateTexture2D hr=0x%08lx\n", (unsigned long)hr); return 1; }
+        if (route == 0)
+            printf("VPRT plain texture: D3DMetal's own MTLTexture 0x%llx type=%u arr=%u usage=0x%llx fmt=%u via %s\n",
+                   (unsigned long long)p.created_texture, p.desc_texture_type, p.desc_array_length,
+                   (unsigned long long)p.desc_usage, p.desc_pixel_format, p.where);
+        vprt_render(dev, ctx, &s, tex, view_fmt, route);
+        gpu_idle(dev, ctx);
+        uint8_t a[2][4], b[2][4];
+        vprt_read_d3d(dev, ctx, tex, a);
+        vprt_read_mtl(p.created_texture, b);
+        bool bgra = res_fmt == DXGI_FORMAT_B8G8R8A8_TYPELESS || res_fmt == DXGI_FORMAT_B8G8R8A8_UNORM;
+        pass += vprt_judge("plain", route, a, bgra, "D3D11 staging");
+        if (p.created_texture) vprt_judge("plain", route, b, bgra, "Metal blit");
+        tex->Release();
+    }
+    printf("VPRT plain: %d/%d routes correct\n", pass, VPRT_NROUTES);
+    return 0;
+}
+
+/* (b) the substituted runtime texture: one arraySize=2 swapchain, as Unity creates */
+static int run_vprt_xr(HMODULE dll, ID3D11Device *dev, ID3D11DeviceContext *ctx)
+{
+    auto negotiate = (PFN_xrNegotiateLoaderRuntimeInterface)GetProcAddress(dll, "xrNegotiateLoaderRuntimeInterface");
+    XrNegotiateLoaderInfo li = { XR_LOADER_INTERFACE_STRUCT_LOADER_INFO, XR_LOADER_INFO_STRUCT_VERSION, sizeof(li) };
+    li.minInterfaceVersion = 1; li.maxInterfaceVersion = XR_CURRENT_LOADER_RUNTIME_VERSION;
+    li.minApiVersion = XR_MAKE_VERSION(1,0,0); li.maxApiVersion = XR_MAKE_VERSION(1,0,999);
+    XrNegotiateRuntimeRequest req = { XR_LOADER_INTERFACE_STRUCT_RUNTIME_REQUEST, XR_RUNTIME_INFO_STRUCT_VERSION, sizeof(req) };
+    if (negotiate(&li, &req) != XR_SUCCESS) { printf("FAIL: negotiate\n"); return 1; }
+    gipa = req.getInstanceProcAddr;
+    const char *ext = XR_KHR_D3D11_ENABLE_EXTENSION_NAME;
+    XrInstanceCreateInfo ici = { XR_TYPE_INSTANCE_CREATE_INFO };
+    ici.enabledExtensionCount = 1; ici.enabledExtensionNames = &ext;
+    ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1,0,34);
+    snprintf(ici.applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE, "dmsubst-vprt");
+    XrInstance inst;
+    CHECK(fn<PFN_xrCreateInstance>(XR_NULL_HANDLE, "xrCreateInstance")(&ici, &inst));
+    XrSystemGetInfo sgi = { XR_TYPE_SYSTEM_GET_INFO }; sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    XrSystemId sys;
+    CHECK(fn<PFN_xrGetSystem>(inst, "xrGetSystem")(inst, &sgi, &sys));
+    XrGraphicsRequirementsD3D11KHR reqs = { XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR };
+    CHECK(fn<PFN_xrGetD3D11GraphicsRequirementsKHR>(inst, "xrGetD3D11GraphicsRequirementsKHR")(inst, sys, &reqs));
+    XrGraphicsBindingD3D11KHR bind = { XR_TYPE_GRAPHICS_BINDING_D3D11_KHR }; bind.device = dev;
+    XrSessionCreateInfo sci = { XR_TYPE_SESSION_CREATE_INFO }; sci.next = &bind; sci.systemId = sys;
+    XrSession session;
+    CHECK(fn<PFN_xrCreateSession>(inst, "xrCreateSession")(inst, &sci, &session));
+
+    int64_t fmt = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    if (getenv("DMS_TEST_FORMAT")) fmt = atoll(getenv("DMS_TEST_FORMAT"));
+    XrSwapchainCreateInfo scci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
+    scci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    scci.format = fmt; scci.sampleCount = 1; scci.width = 64; scci.height = 64;
+    scci.faceCount = 1; scci.arraySize = 2; scci.mipCount = 1;
+    XrSwapchain sc;
+    CHECK(fn<PFN_xrCreateSwapchain>(inst, "xrCreateSwapchain")(session, &scci, &sc));
+    XrSwapchainImageD3D11KHR imgs[8]; uint32_t n = 0;
+    for (int i = 0; i < 8; i++) imgs[i] = { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR };
+    CHECK(fn<PFN_xrEnumerateSwapchainImages>(inst, "xrEnumerateSwapchainImages")(sc, 8, &n, (XrSwapchainImageBaseHeader *)imgs));
+    auto acquire = fn<PFN_xrAcquireSwapchainImage>(inst, "xrAcquireSwapchainImage");
+    auto wait = fn<PFN_xrWaitSwapchainImage>(inst, "xrWaitSwapchainImage");
+    auto release = fn<PFN_xrReleaseSwapchainImage>(inst, "xrReleaseSwapchainImage");
+    vprt_shaders s; if (!vprt_compile(dev, &s)) return 1;
+    int pass = 0;
+    bool bgra = fmt == DXGI_FORMAT_B8G8R8A8_UNORM || fmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    for (int route = 0; route < VPRT_NROUTES; route++) {
+        uint32_t idx = 0;
+        XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+        XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO }; wi.timeout = XR_INFINITE_DURATION;
+        XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+        acquire(sc, &ai, &idx); wait(sc, &wi);
+        D3D11_TEXTURE2D_DESC td; imgs[idx].texture->GetDesc(&td);
+        if (route == 0) {
+            struct dmsubst_params q = {}; q.op = DMSUBST_OP_READBACK; q.mtl_texture = sc_tex(sc, idx); dms(&q);
+            printf("VPRT subst: image %u desc %ux%u arr=%u fmt=%d; runtime MTLTexture 0x%llx fmt=%u\n", idx, td.Width,
+                   td.Height, td.ArraySize, (int)td.Format, (unsigned long long)sc_tex(sc, idx), q.tex_pixel_format);
+        }
+        vprt_render(dev, ctx, &s, imgs[idx].texture, (DXGI_FORMAT)fmt, route);
+        release(sc, &ri);
+        gpu_idle(dev, ctx);
+        uint8_t a[2][4], b[2][4];
+        vprt_read_d3d(dev, ctx, imgs[idx].texture, a);
+        vprt_read_mtl(sc_tex(sc, idx), b);
+        vprt_judge("subst", route, a, bgra, "D3D11 staging");
+        pass += vprt_judge("subst", route, b, bgra, "runtime MTLTexture");
+    }
+    printf("VPRT subst: %d/%d routes correct (runtime texture)\n", pass, VPRT_NROUTES);
+    ctx->ClearState(); ctx->Flush();
+    CHECK(fn<PFN_xrDestroySwapchain>(inst, "xrDestroySwapchain")(sc));
+    CHECK(fn<PFN_xrDestroySession>(inst, "xrDestroySession")(session));
+    CHECK(fn<PFN_xrDestroyInstance>(inst, "xrDestroyInstance")(inst));
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "both";
@@ -505,5 +964,10 @@ int main(int argc, char **argv)
     if (!strcmp(mode, "probe") || !strcmp(mode, "both")) rc |= run_probe(dev);
     if (!strcmp(mode, "probe") || !strcmp(mode, "both") || !strcmp(mode, "fence")) rc |= run_fence_probe(dev, ctx);
     if (!rc && (!strcmp(mode, "xr") || !strcmp(mode, "both"))) rc |= run_xr(dll, dev, ctx, frames);
+    if (!strcmp(mode, "vprt") || !strcmp(mode, "caps")) log_caps(dev);
+    if (!strcmp(mode, "vprt")) {
+        rc |= run_vprt_plain(dev, ctx, DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        if (!getenv("DMS_TEST_NO_XR")) rc |= run_vprt_xr(dll, dev, ctx);
+    }
     return rc;
 }
