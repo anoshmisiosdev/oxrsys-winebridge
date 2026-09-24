@@ -107,6 +107,13 @@ int main(void)
 
 	uint32_t w = 0, h = 0;
 	system->GetRecommendedRenderTargetSize(&w, &h);
+	/* Like HITMAN 3: read the projection once, at startup */
+	for (int eye = 0; eye < 2; eye++) {
+		float l, r, t, b;
+		system->GetProjectionRaw((EVREye)eye, &l, &r, &t, &b);
+		/* (GetEyeToHeadTransform returns a struct by value with MSVC's ABI, which a GCC-built caller can't take) */
+		printf("eye %d projection raw L=%.4f R=%.4f T=%.4f B=%.4f\n", eye, l, r, t, b);
+	}
 	printf("recommended size %ux%u, format %d, sbs %d, submit state %#x\n", w, h, fmt, sbs, submitState);
 	fflush(stdout);
 
