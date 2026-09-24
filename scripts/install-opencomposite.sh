@@ -21,15 +21,21 @@
 # the tree) is backed up once to openvr_api.dll.stock and replaced with the
 # OpenComposite build. 32-bit copies (bin/win32 etc.) are left alone.
 # Restore: puts every .stock backup back.
+#
+# Which build is installed: $OC_DLL if set, else the newest
+# opencomposite/build*/bin/vrclient_x64.dll (canonical: opencomposite/build;
+# $OC_BUILD_DIR limits it to one dir), stripped. Never a stale
+# build/bin/openvr_api.dll. The choice and its revision are printed; see
+# scripts/lib/opencomposite-dll.sh.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DLL="$ROOT/opencomposite/build/bin/openvr_api.dll"
-[ -f "$DLL" ] || DLL="$ROOT/opencomposite/build/bin/vrclient_x64.dll"
+# shellcheck source=lib/opencomposite-dll.sh
+. "$ROOT/scripts/lib/opencomposite-dll.sh"
 BOTTLES_DIR="$HOME/Library/Application Support/CrossOver/Bottles"
 
 usage() {
-	sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
 	exit 1
 }
 
@@ -134,7 +140,8 @@ if [ "$RESTORE" -eq 1 ]; then
 	[ "$restored" -gt 0 ] || { echo "ERROR: no .stock backups found - nothing to restore" >&2; exit 1; }
 	echo "Done: restored $restored file(s)."
 else
-	[ -f "$DLL" ] || { echo "ERROR: built DLL not found ($DLL). Build it first - see docs/opencomposite.md" >&2; exit 1; }
+	oc_select_dll "$ROOT"
+	DLL="$OC_INSTALL_DLL"
 	for dir in "${targets[@]}"; do
 		if [ -f "$dir/openvr_api.dll" ] && [ ! -f "$dir/openvr_api.dll.stock" ]; then
 			cp -p "$dir/openvr_api.dll" "$dir/openvr_api.dll.stock"

@@ -14,8 +14,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DLL="$ROOT/opencomposite/build/bin/openvr_api.dll"
-[ -f "$DLL" ] || DLL="$ROOT/opencomposite/build/bin/vrclient_x64.dll"
+# shellcheck source=lib/opencomposite-dll.sh
+. "$ROOT/scripts/lib/opencomposite-dll.sh"   # picks the build; see that file
 BOTTLES="$HOME/Library/Application Support/CrossOver/Bottles"
 
 BOTTLE="VR"; RESTORE=0; WATCH=0
@@ -28,7 +28,10 @@ esac; done
 
 DRIVE_C="$BOTTLES/$BOTTLE/drive_c"
 [ -d "$DRIVE_C" ] || { echo "ERROR: bottle '$BOTTLE' not found"; exit 1; }
-[ -f "$DLL" ] || { echo "ERROR: OpenComposite build not found; build opencomposite first"; exit 1; }
+if [ "$RESTORE" -eq 0 ]; then
+  oc_select_dll "$ROOT"
+  DLL="$OC_INSTALL_DLL"
+fi
 
 # Discover every Steam library folder (games may live outside the default one).
 find_libraries() {

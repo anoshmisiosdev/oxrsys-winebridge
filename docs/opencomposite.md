@@ -110,6 +110,12 @@ scripts/install-opencomposite.sh --restore 'C:\Program Files (x86)\Steam\steamap
 The script backs up every 64-bit `openvr_api.dll` it finds (game root,
 `bin/win64/`, and any other tree locations except `win32`/`x86` dirs) to
 `openvr_api.dll.stock` before replacing it, and refuses nothing silently.
+It installs a stripped copy of the newest `opencomposite/build*/bin/vrclient_x64.dll`
+(canonical: `build/`; `OC_BUILD_DIR=<dir>` limits it to one build dir, `OC_DLL=<file>`
+picks an exact file) and prints every candidate's date and embedded revision, plus
+the one it chose. It never uses a leftover `build/bin/openvr_api.dll`, which no build
+target updates. `provision-all-steamvr.sh` uses the same selection
+(`scripts/lib/opencomposite-dll.sh`).
 OpenComposite reads an optional `opencomposite.ini` next to the DLL.
 
 ## Known limitations against OXRSys (via the wineopenxr bridge)
