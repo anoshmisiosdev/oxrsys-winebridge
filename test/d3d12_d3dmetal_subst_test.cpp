@@ -21,7 +21,9 @@
  * (one 2-slice swapchain per eye; eye N renders slice N), DMS_TEST_COPY=1
  * (render into an intermediate texture, CopyTextureRegion into the image -
  * REFramework's pattern), DMS_TEST_MSAA=4 (render MSAA, ResolveSubresource
- * into the image), DMS_TEST_SYNCCHECK=1|2 as in the D3D11 test.
+ * into the image), DMS_TEST_SYNCCHECK=1|2 as in the D3D11 test, DMS_TEST_DEPTH=1
+ * (also a D32_FLOAT depth swapchain per eye, cleared per frame and read back).
+ * xr mode also checks that sampleCount>1 and cube swapchains are refused.
  * Bridge knobs: OXR_DMSUBST_TRACE=1|2, OXR_DMSUBST_SYNC=cpu,
  * OXR_BRIDGE_D3D12_BACKEND=d3dmetal|none, OXR_DMSUBST_DUMP_AT=N. D3DMetal's
  * Metal 4 backend: D3DM_MTL4=1 (pass via EXTRA_CX_ENV).
@@ -317,6 +319,57 @@ static int run_xr(HMODULE dll, ID3D12Device *dev, ID3D12CommandQueue *queue, int
     }
     stats("after swapchain images");
 
+    {   /* unsupported swapchain shapes must be refused, not crash */
+        XrSwapchainCreateInfo bad = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
+        bad.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT; bad.format = fmt; bad.width = 256; bad.height = 256;
+        bad.faceCount = 1; bad.arraySize = 1; bad.mipCount = 1; bad.sampleCount = 4;
+        XrSwapchain tmp = XR_NULL_HANDLE;
+        XrResult r1 = fn<PFN_xrCreateSwapchain>(inst, "xrCreateSwapchain")(session, &bad, &tmp);
+        bad.sampleCount = 1; bad.faceCount = 6;
+        XrResult r2 = fn<PFN_xrCreateSwapchain>(inst, "xrCreateSwapchain")(session, &bad, &tmp);
+        printf("%s: MSAA swapchain -> %d, cube swapchain -> %d (expect %d)\n",
+               r1 == XR_ERROR_FEATURE_UNSUPPORTED && r2 == XR_ERROR_FEATURE_UNSUPPORTED ? "OK" : "FAIL",
+               r1, r2, XR_ERROR_FEATURE_UNSUPPORTED);
+    }
+
+    /* DMS_TEST_DEPTH=1: a D32_FLOAT depth swapchain per eye (same arraySize) */
+    const int with_depth = getenv("DMS_TEST_DEPTH") && atoi(getenv("DMS_TEST_DEPTH"));
+    XrSwapchain dsc[2] = {}; ID3D12Resource *dimg[2][8] = {}; uint32_t ndimg[2] = {};
+    ID3D12DescriptorHeap *dsv_heap = nullptr; UINT dsv_inc = 0; D3D12_CPU_DESCRIPTOR_HANDLE dsv_base = {};
+    float dlast[2][8] = {}; int dcleared[2][8] = {};
+    if (with_depth) {
+        D3D12_DESCRIPTOR_HEAP_DESC dd = {}; dd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; dd.NumDescriptors = 16;
+        dev->CreateDescriptorHeap(&dd, __uuidof(ID3D12DescriptorHeap), (void **)&dsv_heap);
+        dsv_inc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        dsv_base = dsv_heap->GetCPUDescriptorHandleForHeapStart();
+        for (int eye = 0; eye < 2; eye++) {
+            XrSwapchainCreateInfo scci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
+            scci.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+            scci.format = DXGI_FORMAT_D32_FLOAT; scci.sampleCount = 1; scci.width = W; scci.height = H;
+            scci.faceCount = 1; scci.arraySize = arr; scci.mipCount = 1;
+            CHECK(fn<PFN_xrCreateSwapchain>(inst, "xrCreateSwapchain")(session, &scci, &dsc[eye]));
+            XrSwapchainImageD3D12KHR imgs[8];
+            for (int i = 0; i < 8; i++) imgs[i] = { XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR };
+            CHECK(fn<PFN_xrEnumerateSwapchainImages>(inst, "xrEnumerateSwapchainImages")
+                  (dsc[eye], 8, &ndimg[eye], (XrSwapchainImageBaseHeader *)imgs));
+            for (uint32_t i = 0; i < ndimg[eye]; i++) {
+                dimg[eye][i] = imgs[i].texture;
+                D3D12_DEPTH_STENCIL_VIEW_DESC dv = {}; dv.Format = DXGI_FORMAT_D32_FLOAT;
+                dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+                if (arr > 1) {
+                    dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+                    dv.Texture2DArray.FirstArraySlice = eye; dv.Texture2DArray.ArraySize = 1;
+                }
+                D3D12_CPU_DESCRIPTOR_HANDLE h = dsv_base; h.ptr += (SIZE_T)(eye * 8 + i) * dsv_inc;
+                dev->CreateDepthStencilView(dimg[eye][i], &dv, h);
+                D3D12_RESOURCE_DESC rd = dimg[eye][i]->GetDesc();
+                printf("    depth eye %d image %u: ID3D12Resource %p (fmt %d flags 0x%x) runtime MTLTexture 0x%llx\n",
+                       eye, i, (void *)dimg[eye][i], (int)rd.Format, (unsigned)rd.Flags,
+                       (unsigned long long)sc_tex(dsc[eye], i));
+            }
+        }
+    }
+
     /* Intermediate per-eye targets for the copy / MSAA-resolve variants */
     ID3D12Resource *mid[2] = {};
     if (copy_in || msaa > 1) {
@@ -467,6 +520,23 @@ static int run_xr(HMODULE dll, ID3D12Device *dev, ID3D12CommandQueue *queue, int
             memcpy(last[eye][idx], c, sizeof(c)); cleared[eye][idx] = 1;
             XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
             release(sc[eye], &ri);
+            if (with_depth) {
+                uint32_t didx = 0;
+                acquire(dsc[eye], &ai, &didx);
+                wait(dsc[eye], &wi);
+                const int a2 = (a + 1) % NA;   /* a second allocator slot for the depth list */
+                if (!gs.wait(alloc_done[a2])) { printf("FAIL: allocator fence timeout\n"); return 1; }
+                alloc[a2]->Reset(); cl->Reset(alloc[a2], nullptr);
+                const float dv = 0.25f + 0.5f * eye + (float)(f % 8) / 64.0f;
+                D3D12_CPU_DESCRIPTOR_HANDLE h = dsv_base; h.ptr += (SIZE_T)(eye * 8 + didx) * dsv_inc;
+                cl->ClearDepthStencilView(h, D3D12_CLEAR_FLAG_DEPTH, dv, 0, 0, nullptr);
+                cl->Close();
+                ID3D12CommandList *dl[] = { cl };
+                queue->ExecuteCommandLists(1, dl);
+                alloc_done[a2] = gs.signal(queue);
+                dlast[eye][didx] = dv; dcleared[eye][didx] = 1;
+                release(dsc[eye], &ri);
+            }
             if (synccheck && eye == 0) {
                 struct dmsubst_params p = {}; p.op = DMSUBST_OP_READBACK;
                 p.mtl_texture = sc_tex(sc[0], idx); p.x = W / 2; p.y = H / 2; p.slice = 0;
@@ -525,12 +595,28 @@ static int run_xr(HMODULE dll, ID3D12Device *dev, ID3D12CommandQueue *queue, int
                 checked++; if (!ok) bad++;
             }
         }
+    if (with_depth)
+        for (int eye = 0; eye < 2; eye++)
+            for (uint32_t i = 0; i < ndimg[eye]; i++) {
+                if (!dcleared[eye][i]) continue;
+                struct dmsubst_params p = {}; p.op = DMSUBST_OP_READBACK;
+                p.mtl_texture = sc_tex(dsc[eye], i); p.x = W / 2; p.y = H / 2; p.slice = arr > 1 ? eye : 0;
+                int ok = !dms(&p) && fabsf(p.rgba[0] - dlast[eye][i]) < 1e-6f;
+                printf("READBACK depth eye %d image %u slice %u (MTL fmt %u): %.6f, expected %.6f %s\n", eye, i, p.slice,
+                       p.tex_pixel_format, p.rgba[0], dlast[eye][i], ok ? "MATCH" : "MISMATCH");
+                checked++; if (!ok) bad++;
+            }
     stats("after frames");
     printf("%s: %d/%d texels match\n", bad ? "FAIL" : "PASS", checked - bad, checked);
 
     for (int i = 0; i < NA; i++) alloc[i]->Release();
     cl->Release(); pso->Release(); rootsig->Release(); rtv_heap->Release();
     for (int eye = 0; eye < 2; eye++) if (mid[eye]) mid[eye]->Release();
+    if (with_depth) {
+        CHECK(fn<PFN_xrDestroySwapchain>(inst, "xrDestroySwapchain")(dsc[0]));
+        CHECK(fn<PFN_xrDestroySwapchain>(inst, "xrDestroySwapchain")(dsc[1]));
+        dsv_heap->Release();
+    }
     CHECK(fn<PFN_xrDestroySwapchain>(inst, "xrDestroySwapchain")(sc[0]));
     CHECK(fn<PFN_xrDestroySwapchain>(inst, "xrDestroySwapchain")(sc[1]));
     CHECK(fn<PFN_xrDestroySession>(inst, "xrDestroySession")(session));
