@@ -1,8 +1,9 @@
 #!/bin/bash
 # Build "OXRSys Launcher.app" (arm64) into launcher/build/.
 #
-#   scripts/build-launcher.sh              # ad-hoc signed
+#   scripts/build-launcher.sh              # first "Apple Development" identity, else ad-hoc
 #   SIGN_IDENTITY="Apple Development: …" scripts/build-launcher.sh
+#   SIGN_IDENTITY=- scripts/build-launcher.sh   # force ad-hoc
 #
 # With an ad-hoc signature macOS ties the System Audio Recording grant to this exact
 # build, so every rebuild asks again. A real signing identity keeps the grant.
@@ -37,6 +38,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSAudioCaptureUsageDescription</key><string>OXRSys Launcher captures your game's audio to stream it to your VR headset.</string>
 </dict></plist>
 PLIST
-codesign --force --sign "${SIGN_IDENTITY:--}" "$APP"
+if [ -z "${SIGN_IDENTITY:-}" ]; then
+  SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null |
+    sed -nE 's/.*"(Apple Development: [^"]+)".*/\1/p' | head -1)"
+  SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+fi
+echo "Signing with: $SIGN_IDENTITY"
+codesign --force --sign "$SIGN_IDENTITY" "$APP"
 codesign --verify --verbose=1 "$APP"
 echo "Built: $APP"

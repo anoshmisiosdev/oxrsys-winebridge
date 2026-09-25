@@ -65,8 +65,13 @@ System Audio Recording Only). Until you click **Allow**, capture waits (the UI s
 responsive). The launcher must be started from Finder, the Dock or `open`, not from
 CrossOver, so the permission is attributed to the launcher itself.
 
-An ad-hoc signed build is a new identity to macOS, so each rebuild asks again. Build with
-`SIGN_IDENTITY="Apple Development: …"` to keep the grant.
+The build script signs with the first "Apple Development" identity in your keychain,
+so the grant survives rebuilds. With no such identity (or `SIGN_IDENTITY=-`) it signs
+ad-hoc, and macOS asks again after every rebuild.
+
+Headset audio needs an OXRSys runtime with the tap-ring reader (oxrsys-src branch
+`feat/tap-audio`). Over Wi-Fi it also needs a Quest client with UDP audio support
+(same branch); before that, audio was USB-only.
 
 ## Build and run
 
@@ -76,7 +81,7 @@ open "launcher/build/OXRSys Launcher.app"
 ```
 
 The script uses `env -u TOOLCHAINS xcrun swift build -c release --arch arm64` and then
-assembles and ad-hoc signs the bundle. It does not install into `/Applications`; copy
+assembles and signs the bundle (see Permissions). It does not install into `/Applications`; copy
 the app there yourself if you want it in the Dock.
 
 Debug flags (these print JSON or text and exit):
