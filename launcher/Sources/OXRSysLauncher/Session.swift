@@ -356,12 +356,17 @@ final class LaunchSession: ObservableObject {
         if audio != .off { audio = .off }
     }
 
-    /// Synchronous stop for app termination, so the ring is marked inactive before exit.
+    /// Stop for app termination, so the ring is marked inactive before exit. Bounded:
+    /// a tap start still waiting on the System Audio Recording prompt holds the audio
+    /// queue, and quitting must not hang behind it (the ring is not live yet then, and
+    /// the runtime treats a dead writer as stale after a second anyway).
     func stopAudioSync() {
         monitor?.cancel()
         monitor = nil
         let engine = headsetAudio
-        audioQueue.sync { engine.stop() }
+        let done = DispatchSemaphore(value: 0)
+        audioQueue.async { engine.stop(); done.signal() }
+        _ = done.wait(timeout: .now() + 2)
     }
 
     func stopSession() {
