@@ -18,3 +18,7 @@ opencomposite-input-fix/
 opencomposite-vtable-fix/
 Pacman VR/
 test/*.log
+
+# VR launcher build output
+launcher/build/
+launcher/.build/
